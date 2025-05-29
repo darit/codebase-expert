@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Codebase Expert - Universal tool for codebase knowledge
-Works with any project to create searchable video memory
+Enhanced Codebase Expert - Universal tool for codebase knowledge
+Works with any project to create searchable video memory with better organization
 
 MCP Installation (for Claude Desktop):
     claude mcp add "Codebase Expert" python /path/to/codebase_expert.py serve
 
 Standalone Usage:
-    # Generate video memory
-    python codebase_expert.py generate
+    # Generate video memory with organized output
+    python codebase_expert.py generate --output-dir ./codebase-memory
     
     # Interactive chat
     python codebase_expert.py chat
@@ -33,6 +33,10 @@ from datetime import datetime
 import logging
 from pathlib import Path
 import fnmatch
+import shutil
+import zipfile
+import io
+from contextlib import redirect_stdout, redirect_stderr
 
 # Conditional imports
 try:
@@ -86,13 +90,41 @@ CODE_EXTENSIONS = [
 ]
 
 class CodebaseExpert:
-    """Main expert class that handles all functionality."""
+    """Enhanced expert class with better organization and features."""
     
-    def __init__(self, base_path: Optional[str] = None):
+    def __init__(self, base_path: Optional[str] = None, output_dir: Optional[str] = None):
         self.base_path = base_path or os.getcwd()
         self.project_name = self.detect_project_name()
-        self.video_path = os.path.join(self.base_path, "codebase_memory.mp4")
-        self.index_path = os.path.join(self.base_path, "codebase_index.json")
+        
+        # Output directory management
+        if output_dir:
+            # Use provided output directory
+            self.output_dir = output_dir
+        else:
+            # Default to organized folder name
+            self.output_dir = os.path.join(self.base_path, f"codebase-memory-{self.project_name}")
+        
+        self.video_path = os.path.join(self.output_dir, "codebase_memory.mp4")
+        self.index_path = os.path.join(self.output_dir, "codebase_index.json")
+        self.faiss_path = os.path.join(self.output_dir, "codebase_index.faiss")
+        self.metadata_path = os.path.join(self.output_dir, "metadata.json")
+        
+        # Keep track of whether we're using the old location
+        self._using_old_location = False
+        
+        # Fallback to old location if it exists (only when not explicitly setting output_dir)
+        # and only for reading existing files, not for generation
+        if not output_dir:
+            old_video = os.path.join(self.base_path, "codebase_memory.mp4")
+            old_index = os.path.join(self.base_path, "codebase_index.json")
+            if os.path.exists(old_video) and os.path.exists(old_index):
+                # Use old location for reading if new location doesn't have files
+                if not os.path.exists(self.video_path):
+                    self.video_path = old_video
+                    self.index_path = old_index
+                    self.output_dir = self.base_path
+                    self._using_old_location = True
+        
         self.retriever = None
         self.video_generation_in_progress = False
         self.video_generation_start_time = None
@@ -163,12 +195,18 @@ class CodebaseExpert:
         if not MEMVID_AVAILABLE:
             raise ImportError("Memvid not available")
         
+        # Suppress initialization messages
+        import logging
+        old_level = logging.root.level
+        logging.root.setLevel(logging.CRITICAL)
+        
         try:
-            self.retriever = MemvidRetriever(self.video_path, self.index_path)
-            logger.info("Memvid retriever initialized successfully")
+            with io.StringIO() as buf, redirect_stdout(buf), redirect_stderr(buf):
+                self.retriever = MemvidRetriever(self.video_path, self.index_path)
         except Exception as e:
-            logger.error(f"Error initializing memvid: {e}")
             raise
+        finally:
+            logging.root.setLevel(old_level)
     
     def detect_project_type(self) -> str:
         """Detect the type of project."""
@@ -261,12 +299,14 @@ class CodebaseExpert:
         
         return chunks
     
-    def extract_code_chunks(self, scan_path: str, relative_to: str) -> List[str]:
+    def extract_code_chunks(self, scan_path: str, relative_to: str) -> Tuple[List[str], List[str]]:
         """Extract code chunks from directory."""
         chunks = []
         ignore_patterns = DEFAULT_IGNORE_PATTERNS + self.read_gitignore(scan_path)
         
         total_files = 0
+        file_list = []
+        
         for root, dirs, files in os.walk(scan_path):
             dirs[:] = [d for d in dirs if not self.should_ignore(os.path.join(root, d), ignore_patterns)]
             
@@ -288,6 +328,7 @@ class CodebaseExpert:
                             continue
                         
                         total_files += 1
+                        file_list.append(relative_path)
                         content_chunks = self.split_large_content(content)
                         
                         for i, chunk_content in enumerate(content_chunks):
@@ -302,26 +343,323 @@ class CodebaseExpert:
                     logger.error(f"Error reading {file_path}: {e}")
         
         print(f"Processed {total_files} files into {len(chunks)} chunks")
-        return chunks
+        return chunks, file_list
     
-    def generate_video(self):
-        """Generate the video from codebase."""
+    def generate_context_chunks(self, file_list: List[str]) -> List[str]:
+        """Generate special context chunks for better RAG quality."""
+        context_chunks = []
+        
+        # 1. Project Overview Chunk
+        overview = f"""=== PROJECT OVERVIEW ===
+
+Project Name: {self.project_name}
+Project Type: {self.detect_project_type()}
+Base Path: {self.base_path}
+Total Files: {len(file_list)}
+
+This is a comprehensive codebase index containing all source code, configuration files, and documentation.
+"""
+        context_chunks.append(overview)
+        
+        # 2. Folder Structure Chunk
+        structure = f"""=== FOLDER STRUCTURE ===
+
+{self.get_folder_structure()}
+
+This folder structure represents the organization of the codebase.
+"""
+        context_chunks.append(structure)
+        
+        # 3. Git History Chunk
+        git_info = self.get_git_info()
+        if 'error' not in git_info:
+            git_chunk = f"""=== GIT HISTORY ===
+
+Current Branch: {git_info.get('current_branch', 'unknown')}
+Remote Origin: {git_info.get('remote_origin', 'unknown')}
+
+Recent Commits:
+{chr(10).join(git_info.get('recent_commits', [])[:10])}
+
+Top Contributors:
+{chr(10).join(git_info.get('top_contributors', [])[:5])}
+"""
+            context_chunks.append(git_chunk)
+        
+        # 4. File Extensions Summary
+        extensions = {}
+        for file in file_list:
+            ext = os.path.splitext(file)[1]
+            if ext:
+                extensions[ext] = extensions.get(ext, 0) + 1
+        
+        ext_summary = f"""=== FILE TYPES SUMMARY ===
+
+File extensions in this codebase:
+"""
+        for ext, count in sorted(extensions.items(), key=lambda x: x[1], reverse=True):
+            ext_summary += f"\n{ext}: {count} files"
+        context_chunks.append(ext_summary)
+        
+        # 5. README content if exists
+        for readme_name in ['README.md', 'readme.md', 'README.txt', 'README']:
+            readme_path = os.path.join(self.base_path, readme_name)
+            if os.path.exists(readme_path):
+                try:
+                    with open(readme_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        readme_content = f.read()
+                        if readme_content:
+                            readme_chunk = f"""=== {readme_name} ===
+
+{readme_content}
+"""
+                            context_chunks.append(readme_chunk)
+                            break
+                except:
+                    pass
+        
+        # 6. Package/Dependency Information
+        dep_info = self.get_dependency_info()
+        if dep_info:
+            dep_chunk = f"""=== DEPENDENCIES ===
+
+{dep_info}
+"""
+            context_chunks.append(dep_chunk)
+        
+        return context_chunks
+    
+    def get_dependency_info(self) -> str:
+        """Extract dependency information from various package files."""
+        dep_info = []
+        
+        # package.json for Node.js
+        package_json = os.path.join(self.base_path, 'package.json')
+        if os.path.exists(package_json):
+            try:
+                with open(package_json, 'r') as f:
+                    data = json.load(f)
+                    deps = data.get('dependencies', {})
+                    dev_deps = data.get('devDependencies', {})
+                    
+                    dep_info.append("Node.js Dependencies:")
+                    for dep, version in list(deps.items())[:20]:
+                        dep_info.append(f"  {dep}: {version}")
+                    if len(deps) > 20:
+                        dep_info.append(f"  ... and {len(deps) - 20} more")
+                    
+                    if dev_deps:
+                        dep_info.append("\nDev Dependencies:")
+                        for dep, version in list(dev_deps.items())[:10]:
+                            dep_info.append(f"  {dep}: {version}")
+                        if len(dev_deps) > 10:
+                            dep_info.append(f"  ... and {len(dev_deps) - 10} more")
+            except:
+                pass
+        
+        # requirements.txt for Python
+        requirements = os.path.join(self.base_path, 'requirements.txt')
+        if os.path.exists(requirements):
+            try:
+                with open(requirements, 'r') as f:
+                    lines = f.readlines()
+                    dep_info.append("\nPython Requirements:")
+                    for line in lines[:20]:
+                        line = line.strip()
+                        if line and not line.startswith('#'):
+                            dep_info.append(f"  {line}")
+                    if len(lines) > 20:
+                        dep_info.append(f"  ... and more")
+            except:
+                pass
+        
+        return "\n".join(dep_info) if dep_info else ""
+    
+    def get_folder_structure(self, max_depth: int = 3) -> str:
+        """Generate a tree-like folder structure."""
+        structure_lines = []
+        
+        def add_tree(path: str, prefix: str = "", depth: int = 0):
+            if depth > max_depth:
+                return
+            
+            try:
+                items = sorted(os.listdir(path))
+                # Filter out common ignore patterns
+                items = [item for item in items if not any(
+                    fnmatch.fnmatch(item, pattern) for pattern in ['.git', 'node_modules', '__pycache__', '*.pyc', 'venv', 'myenv']
+                )]
+                
+                for i, item in enumerate(items[:20]):  # Limit items per folder
+                    item_path = os.path.join(path, item)
+                    is_last = i == len(items) - 1
+                    
+                    if os.path.isdir(item_path):
+                        structure_lines.append(f"{prefix}{'└── ' if is_last else '├── '}{item}/")
+                        extension = "    " if is_last else "│   "
+                        add_tree(item_path, prefix + extension, depth + 1)
+                    else:
+                        structure_lines.append(f"{prefix}{'└── ' if is_last else '├── '}{item}")
+                
+                if len(items) > 20:
+                    structure_lines.append(f"{prefix}└── ... ({len(items) - 20} more items)")
+            except PermissionError:
+                pass
+        
+        structure_lines.append(f"{self.project_name}/")
+        add_tree(self.base_path, "")
+        return "\n".join(structure_lines)
+    
+    def get_git_info(self) -> Dict[str, Any]:
+        """Get git repository information."""
+        git_info = {}
+        
+        try:
+            # Check if it's a git repo
+            subprocess.run(['git', 'rev-parse', '--git-dir'], 
+                         cwd=self.base_path, capture_output=True, check=True)
+            
+            # Get current branch
+            result = subprocess.run(['git', 'branch', '--show-current'], 
+                                  cwd=self.base_path, capture_output=True, text=True)
+            git_info['current_branch'] = result.stdout.strip()
+            
+            # Get recent commits
+            result = subprocess.run(['git', 'log', '--oneline', '-10'], 
+                                  cwd=self.base_path, capture_output=True, text=True)
+            git_info['recent_commits'] = result.stdout.strip().split('\n')
+            
+            # Get remote origin
+            result = subprocess.run(['git', 'remote', 'get-url', 'origin'], 
+                                  cwd=self.base_path, capture_output=True, text=True)
+            git_info['remote_origin'] = result.stdout.strip()
+            
+            # Get contributors
+            result = subprocess.run(['git', 'shortlog', '-sn', '--all'], 
+                                  cwd=self.base_path, capture_output=True, text=True)
+            git_info['top_contributors'] = result.stdout.strip().split('\n')[:5]
+            
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            git_info['error'] = 'Not a git repository'
+        
+        return git_info
+    
+    def generate_metadata(self, file_list: List[str], chunks: List[str]) -> Dict[str, Any]:
+        """Generate enhanced metadata for the codebase."""
+        total_size = sum(len(chunk) for chunk in chunks)
+        
+        metadata = {
+            "project_name": self.project_name,
+            "project_type": self.detect_project_type(),
+            "base_path": self.base_path,
+            "generation_date": datetime.now().isoformat(),
+            "statistics": {
+                "total_files": len(file_list),
+                "total_chunks": len(chunks),
+                "total_size_mb": total_size / 1024 / 1024,
+                "unique_extensions": list(set(os.path.splitext(f)[1] for f in file_list if os.path.splitext(f)[1]))
+            },
+            "file_list": file_list[:100],  # First 100 files
+            "folder_structure": self.get_folder_structure(),
+            "git_info": self.get_git_info(),
+            "memvid_version": "latest",
+            "expert_version": "1.1.0"
+        }
+        
+        return metadata
+    
+    def create_package(self, include_video_only: bool = False) -> str:
+        """Create a zip package with all necessary files."""
+        package_name = f"{self.project_name}_codebase_memory_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        package_path = os.path.join(self.base_path, package_name)
+        
+        with zipfile.ZipFile(package_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # Always include the video
+            if os.path.exists(self.video_path):
+                zipf.write(self.video_path, os.path.basename(self.video_path))
+            
+            if not include_video_only:
+                # Include index files
+                if os.path.exists(self.index_path):
+                    zipf.write(self.index_path, os.path.basename(self.index_path))
+                if os.path.exists(self.faiss_path):
+                    zipf.write(self.faiss_path, os.path.basename(self.faiss_path))
+                if os.path.exists(self.metadata_path):
+                    zipf.write(self.metadata_path, os.path.basename(self.metadata_path))
+                
+                # Include a README
+                readme_content = f"""# {self.project_name} Codebase Memory
+
+Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+Project Type: {self.detect_project_type()}
+
+## Contents
+- codebase_memory.mp4: Video containing encoded codebase
+- codebase_index.json: Search index for memvid
+- codebase_index.faiss: Vector embeddings (if available)
+- metadata.json: Project metadata and statistics
+
+## Usage
+Place all files in the same directory and use with codebase_expert.py:
+
+```bash
+python codebase_expert.py chat --base-path /path/to/extracted/files
+```
+
+Or use directly with memvid:
+```python
+from memvid import MemvidRetriever
+retriever = MemvidRetriever("codebase_memory.mp4", "codebase_index.json")
+results = retriever.search_with_metadata("your query", top_k=5)
+```
+"""
+                zipf.writestr("README.txt", readme_content)
+        
+        return package_path
+    
+    def generate_video(self, create_zip: bool = False, video_only_zip: bool = False):
+        """Generate the video from codebase with enhanced organization."""
         self.ensure_dependencies()
         
-        print(f"Scanning {self.project_name} codebase at: {self.base_path}")
-        print("This may take a few minutes for large codebases...")
+        # If we're using old location for reading, reset paths for generation
+        if self._using_old_location:
+            self.output_dir = os.path.join(self.base_path, f"codebase-memory-{self.project_name}")
+            self.video_path = os.path.join(self.output_dir, "codebase_memory.mp4")
+            self.index_path = os.path.join(self.output_dir, "codebase_index.json")
+            self.faiss_path = os.path.join(self.output_dir, "codebase_index.faiss")
+            self.metadata_path = os.path.join(self.output_dir, "metadata.json")
+        
+        # Create output directory if it doesn't exist
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+        print(f"🚀 Scanning {self.project_name} codebase at: {self.base_path}")
+        print(f"📁 Output directory: {self.output_dir}")
+        print("⏳ This may take a few minutes for large codebases...")
         
         # Extract all code chunks
-        all_chunks = self.extract_code_chunks(self.base_path, self.base_path)
+        all_chunks, file_list = self.extract_code_chunks(self.base_path, self.base_path)
         
-        print(f"\nTotal chunks collected: {len(all_chunks)}")
+        print(f"\n📊 Total chunks collected: {len(all_chunks)}")
+        
+        # Add special context chunks
+        print("🔍 Adding enhanced context...")
+        context_chunks = self.generate_context_chunks(file_list)
+        all_chunks = context_chunks + all_chunks
+        print(f"📊 Total chunks with context: {len(all_chunks)}")
         
         if not all_chunks:
-            print("No code files found!")
+            print("❌ No code files found!")
             print("Make sure you're in the right directory and have code files.")
             return False
         
-        print("\nBuilding video memory...")
+        # Generate metadata
+        metadata = self.generate_metadata(file_list, all_chunks)
+        
+        # Save metadata
+        with open(self.metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        print("\n🎬 Building video memory...")
         encoder = MemvidEncoder()
         encoder.add_chunks(all_chunks)
         
@@ -331,16 +669,41 @@ class CodebaseExpert:
             show_progress=True
         )
         
-        print(f"\nVideo generated successfully!")
-        print(f"Video: {self.video_path}")
-        print(f"Index: {self.index_path}")
+        # Check if FAISS index was created
+        if not os.path.exists(self.faiss_path):
+            # memvid might save it with a different name, try to find it
+            possible_faiss = os.path.join(self.output_dir, "codebase_index.faiss")
+            if not os.path.exists(possible_faiss):
+                possible_faiss = os.path.join(os.path.dirname(self.index_path), 
+                                            os.path.splitext(os.path.basename(self.index_path))[0] + ".faiss")
+            if os.path.exists(possible_faiss) and possible_faiss != self.faiss_path:
+                shutil.copy2(possible_faiss, self.faiss_path)
+        
+        print(f"\n✅ Video generated successfully!")
+        print(f"📹 Video: {self.video_path}")
+        print(f"🔍 Index: {self.index_path}")
+        print(f"📊 Metadata: {self.metadata_path}")
         
         total_size = sum(len(chunk) for chunk in all_chunks)
-        print(f"\nSummary:")
+        print(f"\n📈 Summary:")
+        print(f"- Total files: {len(file_list)}")
         print(f"- Total chunks: {len(all_chunks)}")
         print(f"- Total size: {total_size / 1024 / 1024:.2f} MB")
         print(f"- Video size: {os.path.getsize(self.video_path) / 1024 / 1024:.2f} MB")
         print(f"- Compression ratio: {os.path.getsize(self.video_path) / total_size * 100:.1f}%")
+        
+        # Create zip package if requested
+        if create_zip:
+            print(f"\n📦 Creating shareable package...")
+            package_path = self.create_package(include_video_only=video_only_zip)
+            print(f"✅ Package created: {package_path}")
+            print(f"   Size: {os.path.getsize(package_path) / 1024 / 1024:.2f} MB")
+        
+        print(f"\n💡 Next steps:")
+        print(f"1. Run interactive chat: python {os.path.basename(__file__)} chat")
+        print(f"2. Share the folder: {self.output_dir}")
+        if create_zip:
+            print(f"3. Or share the zip: {os.path.basename(package_path)}")
         
         return True
     
@@ -352,7 +715,16 @@ class CodebaseExpert:
                 return "Knowledge base not found. Run 'generate' first."
             self.initialize_memvid()
         
-        results = self.retriever.search_with_metadata(query, top_k=top_k)
+        # Suppress all output during search including logging
+        import logging
+        old_level = logging.root.level
+        logging.root.setLevel(logging.CRITICAL)
+        
+        try:
+            with io.StringIO() as buf, redirect_stdout(buf), redirect_stderr(buf):
+                results = self.retriever.search_with_metadata(query, top_k=top_k)
+        finally:
+            logging.root.setLevel(old_level)
         
         response = f"Found {len(results)} results for '{query}':\n\n"
         for i, result in enumerate(results, 1):
@@ -372,8 +744,16 @@ class CodebaseExpert:
                 return "Knowledge base not found. Run 'generate' first."
             self.initialize_memvid()
         
-        # Use vector search to find relevant content
-        results = self.retriever.search_with_metadata(question, top_k=5)
+        # Use vector search to find relevant content, suppress all output
+        import logging
+        old_level = logging.root.level
+        logging.root.setLevel(logging.CRITICAL)
+        
+        try:
+            with io.StringIO() as buf, redirect_stdout(buf), redirect_stderr(buf):
+                results = self.retriever.search_with_metadata(question, top_k=5)
+        finally:
+            logging.root.setLevel(old_level)
         
         if not results:
             return "No relevant information found."
@@ -397,8 +777,16 @@ class CodebaseExpert:
                 return "Knowledge base not found. Run 'generate' first."
             self.initialize_memvid()
         
-        # Use search to find relevant chunks and concatenate them
-        results = self.retriever.search_with_metadata(topic, top_k=10)
+        # Use search to find relevant chunks and concatenate them, suppress all output
+        import logging
+        old_level = logging.root.level
+        logging.root.setLevel(logging.CRITICAL)
+        
+        try:
+            with io.StringIO() as buf, redirect_stdout(buf), redirect_stderr(buf):
+                results = self.retriever.search_with_metadata(topic, top_k=10)
+        finally:
+            logging.root.setLevel(old_level)
         
         if not results:
             return f"No context found for '{topic}'"
@@ -426,6 +814,23 @@ class CodebaseExpert:
         
         context = "\n\n---\n\n".join(context_parts)
         return f"Context for '{topic}':\n\n{context}"
+    
+    def get_project_info(self) -> str:
+        """Get project information from metadata."""
+        if os.path.exists(self.metadata_path):
+            with open(self.metadata_path, 'r') as f:
+                metadata = json.load(f)
+            
+            info = f"📊 Project: {metadata['project_name']}\n"
+            info += f"🔧 Type: {metadata['project_type']}\n"
+            info += f"📅 Generated: {metadata['generation_date']}\n"
+            info += f"📁 Files: {metadata['statistics']['total_files']}\n"
+            info += f"📦 Chunks: {metadata['statistics']['total_chunks']}\n"
+            info += f"💾 Size: {metadata['statistics']['total_size_mb']:.2f} MB\n"
+            
+            return info
+        else:
+            return "No metadata found. Generate the knowledge base first."
     
     # CLI methods
     def interactive_chat(self, use_lm_studio=True, lm_studio_url="http://localhost:1234"):
@@ -457,7 +862,7 @@ class CodebaseExpert:
                             lm_chat = {
                                 'url': lm_studio_url,
                                 'model': models[0]['id'],
-                                'system_prompt': """You are a helpful AI assistant that specializes in analyzing codebases.
+                                'system_prompt': f"""You are a helpful AI assistant that specializes in analyzing the {self.project_name} codebase.
 You have access to a searchable knowledge base of the current project's code.
 When answering questions, you search the codebase and provide accurate, relevant information.
 Be concise but thorough in your responses."""
@@ -472,13 +877,18 @@ Be concise but thorough in your responses."""
         
         # Print header
         print(f"\n{Colors.BOLD}{Colors.BLUE}╔══════════════════════════════════════════════════════╗{Colors.ENDC}")
-        print(f"{Colors.BOLD}{Colors.BLUE}║          Codebase Expert - {self.project_name:<25} ║{Colors.ENDC}")
+        print(f"{Colors.BOLD}{Colors.BLUE}║     Enhanced Codebase Expert - {self.project_name:<22} ║{Colors.ENDC}")
         print(f"{Colors.BOLD}{Colors.BLUE}╚══════════════════════════════════════════════════════╝{Colors.ENDC}")
+        
+        # Show project info if available
+        if os.path.exists(self.metadata_path):
+            print(f"\n{self.get_project_info()}")
         
         print(f"\n{Colors.CYAN}Commands:{Colors.ENDC}")
         print("  • Type your questions about the codebase")
         print("  • /search <query> - Direct codebase search")
         print("  • /context <topic> - Get detailed context")
+        print("  • /info - Show project information")
         print("  • /clear - Clear conversation history")
         print("  • /help - Show this help")
         print("  • exit or quit - Exit")
@@ -501,9 +911,14 @@ Be concise but thorough in your responses."""
                     print("  • Type questions naturally")
                     print("  • /search <query> - Direct search")
                     print("  • /context <topic> - Get context")
+                    print("  • /info - Show project info")
                     print("  • /clear - Clear chat history")
                     print("  • /help - Show this help")
                     print("  • exit/quit - Exit")
+                    continue
+                
+                if question == '/info':
+                    print(f"\n{self.get_project_info()}")
                     continue
                 
                 if question == '/clear':
@@ -531,7 +946,7 @@ Be concise but thorough in your responses."""
                 if lm_chat and use_lm_studio:
                     try:
                         import requests
-                        # Search codebase first
+                        # Search codebase first (search_codebase already suppresses output)
                         search_results = self.search_codebase(question, top_k=3)
                         
                         # Build prompt with context
@@ -639,12 +1054,20 @@ Please provide a helpful and accurate answer based on the search results above."
                         },
                         "required": ["topic"]
                     }
+                ),
+                types.Tool(
+                    name="get_project_info",
+                    description="Get project information and statistics",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {}
+                    }
                 )
             ]
         
         @self.server.call_tool()
         async def handle_call_tool(name: str, arguments: Optional[Dict[str, Any]]) -> List[types.TextContent]:
-            if not self.video_exists():
+            if not self.video_exists() and name != "get_project_info":
                 return [types.TextContent(
                     type="text",
                     text="Knowledge base not found. Please generate it first."
@@ -663,6 +1086,8 @@ Please provide a helpful and accurate answer based on the search results above."
                         arguments.get("topic", ""),
                         arguments.get("max_tokens", 2000)
                     )
+                elif name == "get_project_info":
+                    result = self.get_project_info()
                 else:
                     result = f"Unknown tool: {name}"
                 
@@ -689,17 +1114,19 @@ Please provide a helpful and accurate answer based on the search results above."
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Codebase Expert - Universal tool for codebase knowledge",
+        description="Enhanced Codebase Expert - Universal tool for codebase knowledge",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s generate              # Generate knowledge base
-  %(prog)s chat                  # Interactive chat with LM Studio
-  %(prog)s chat --no-lm          # Chat without LM Studio (search only)
-  %(prog)s chat --port 8080      # Use custom LM Studio port
-  %(prog)s ask "How does X work?" # Quick question
-  %(prog)s search "pattern"      # Search codebase
-  %(prog)s serve                 # Run as MCP server
+  %(prog)s generate                    # Generate knowledge base in organized folder
+  %(prog)s generate --zip              # Generate and create shareable zip
+  %(prog)s generate --video-only-zip   # Create zip with just the video
+  %(prog)s chat                        # Interactive chat with LM Studio
+  %(prog)s chat --no-lm                # Chat without LM Studio (search only)
+  %(prog)s chat --port 8080            # Use custom LM Studio port
+  %(prog)s ask "How does X work?"      # Quick question
+  %(prog)s search "pattern"            # Search codebase
+  %(prog)s serve                       # Run as MCP server
         """
     )
     
@@ -708,7 +1135,14 @@ Examples:
                        help='Command to run')
     parser.add_argument('query', nargs='*', help='Query for ask/search commands')
     parser.add_argument('--base-path', help='Override base directory (default: current directory)')
+    parser.add_argument('--output-dir', help='Output directory for generated files')
     parser.add_argument('--top-k', type=int, default=5, help='Number of search results')
+    
+    # Generation options
+    parser.add_argument('--zip', action='store_true',
+                       help='Create a zip package after generation')
+    parser.add_argument('--video-only-zip', action='store_true',
+                       help='Create zip with only the video file')
     
     # LM Studio options
     parser.add_argument('--port', type=int, default=1234,
@@ -721,11 +1155,11 @@ Examples:
     args = parser.parse_args()
     
     # Create expert
-    expert = CodebaseExpert(args.base_path)
+    expert = CodebaseExpert(args.base_path, args.output_dir)
     
     # Execute command
     if args.command == 'generate':
-        expert.generate_video()
+        expert.generate_video(create_zip=args.zip, video_only_zip=args.video_only_zip)
     
     elif args.command == 'chat':
         # Build LM Studio URL
