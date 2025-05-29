@@ -17,7 +17,7 @@ Transform any codebase into a searchable video memory that enables AI-powered co
 ### Quick Start
 ```bash
 # Download the script
-curl -O https://raw.githubusercontent.com/yourusername/codebase-expert/main/codebase_expert.py
+curl -O https://raw.githubusercontent.com/darit/codebase-expert/refs/heads/main/codebase_expert.py
 chmod +x codebase_expert.py
 
 # Run it (installs dependencies automatically)
