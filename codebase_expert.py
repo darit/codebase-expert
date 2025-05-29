@@ -5,7 +5,7 @@ Works with any project to create searchable video memory
 
 Usage:
     # As MCP server (for Claude)
-    uv codebase_expert.py serve
+    claude mcp add "Codebase Expert" python /path/to/codebase_expert.py serve
     
     # Generate video only
     python codebase_expert.py generate
@@ -94,12 +94,11 @@ class CodebaseExpert:
         self.video_path = os.path.join(self.base_path, "codebase_memory.mp4")
         self.index_path = os.path.join(self.base_path, "codebase_index.json")
         self.retriever = None
-        self.chat = None
         self.video_generation_in_progress = False
         self.video_generation_start_time = None
         
         # MCP server if available
-        self.server = Server(f"{self.project_name}-expert") if MCP_AVAILABLE else None
+        self.server = Server("Codebase Expert") if MCP_AVAILABLE else None
     
     def detect_project_name(self) -> str:
         """Detect project name from various sources."""
@@ -165,21 +164,8 @@ class CodebaseExpert:
             raise ImportError("Memvid not available")
         
         try:
-            self.retriever = MemvidRetriever(self.video_path, self.index_path, cache_size=200)
-            self.chat = MemvidChat(self.video_path, self.index_path)
-            
-            # Detect project type for better prompting
-            project_type = self.detect_project_type()
-            
-            system_prompt = f"""You are an expert on the {self.project_name} codebase. 
-            This appears to be a {project_type} project.
-            
-            Provide detailed, accurate answers based on the actual code and architecture.
-            When referencing code, include file paths when possible.
-            Focus on being helpful and explaining how things work."""
-            
-            self.chat.start_session(system_prompt)
-            logger.info("Memvid initialized successfully")
+            self.retriever = MemvidRetriever(self.video_path, self.index_path)
+            logger.info("Memvid retriever initialized successfully")
         except Exception as e:
             logger.error(f"Error initializing memvid: {e}")
             raise
@@ -376,13 +362,25 @@ class CodebaseExpert:
         return response
     
     def ask_question(self, question: str) -> str:
-        """Ask a question about the codebase."""
-        if not self.chat:
+        """Ask a question about the codebase using vector search."""
+        if not self.retriever:
             if not self.video_exists():
                 return "Knowledge base not found. Run 'generate' first."
             self.initialize_memvid()
         
-        return self.chat.chat(question)
+        # Use vector search to find relevant content
+        results = self.retriever.search(question, top_k=5)
+        
+        if not results:
+            return "No relevant information found."
+        
+        response = f"Found relevant information for: '{question}'\n\n"
+        for i, (chunk, score) in enumerate(results, 1):
+            if score > 0.5:  # Only include highly relevant results
+                response += f"**Source {i}** (relevance: {score:.3f}):\n"
+                response += f"```\n{chunk}\n```\n\n"
+        
+        return response
     
     def get_context(self, topic: str, max_tokens: int = 2000) -> str:
         """Get context for a topic."""
@@ -396,8 +394,8 @@ class CodebaseExpert:
     
     # CLI methods
     def interactive_chat(self):
-        """Run interactive chat session."""
-        print(f"Codebase Expert Chat - {self.project_name}")
+        """Run interactive search session."""
+        print(f"Codebase Expert Search - {self.project_name}")
         print("Type 'exit' or 'quit' to end the session")
         print("Commands: /search <query>, /help")
         print("-" * 50)
@@ -410,7 +408,7 @@ class CodebaseExpert:
         
         while True:
             try:
-                question = input("\nYou: ").strip()
+                question = input("\nQuery: ").strip()
                 if question.lower() in ['exit', 'quit']:
                     break
                 
@@ -418,18 +416,17 @@ class CodebaseExpert:
                     print("\nCommands:")
                     print("  /search <query> - Search for specific code")
                     print("  /help - Show this help")
-                    print("  exit/quit - Exit the chat")
-                    print("\nJust type normally to ask questions about the codebase.")
+                    print("  exit/quit - Exit")
+                    print("\nJust type to search the codebase.")
                     continue
                 
                 if question.startswith('/search '):
                     query = question[8:]
-                    print("\nSearching...")
-                    response = self.search_codebase(query)
                 else:
-                    print("\nExpert: ", end='', flush=True)
-                    response = self.ask_question(question)
+                    query = question
                 
+                print("\nSearching...")
+                response = self.search_codebase(query)
                 print(response)
                 
             except KeyboardInterrupt:
@@ -524,7 +521,7 @@ class CodebaseExpert:
                 read_stream,
                 write_stream,
                 InitializationOptions(
-                    server_name=f"{self.project_name}-expert",
+                    server_name="Codebase Expert",
                     server_version="0.1.0",
                     capabilities=self.server.get_capabilities(
                         notification_options=NotificationOptions(),
