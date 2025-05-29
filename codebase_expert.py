@@ -274,7 +274,7 @@ class CodebaseExpert:
         """Check if file has code extension."""
         return any(file_path.lower().endswith(ext) for ext in CODE_EXTENSIONS)
     
-    def split_large_content(self, content: str, max_size: int = 2000) -> List[str]:
+    def split_large_content(self, content: str, max_size: int = 800) -> List[str]:
         """Split large content into chunks."""
         if len(content) <= max_size:
             return [content]
