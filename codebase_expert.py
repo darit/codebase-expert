@@ -274,7 +274,7 @@ class CodebaseExpert:
         """Check if file has code extension."""
         return any(file_path.lower().endswith(ext) for ext in CODE_EXTENSIONS)
     
-    def split_large_content(self, content: str, max_size: int = 800) -> List[str]:
+    def split_large_content(self, content: str, max_size: int = 300) -> List[str]:
         """Split large content into chunks."""
         if len(content) <= max_size:
             return [content]
@@ -286,13 +286,26 @@ class CodebaseExpert:
         
         for line in lines:
             line_size = len(line) + 1
-            if current_size + line_size > max_size and current_chunk:
-                chunks.append('\n'.join(current_chunk))
-                current_chunk = [line]
-                current_size = line_size
+            # If a single line is too long, split it
+            if line_size > max_size:
+                # Split long lines into smaller pieces
+                for i in range(0, len(line), max_size - 50):
+                    line_chunk = line[i:i + max_size - 50]
+                    if current_size + len(line_chunk) > max_size and current_chunk:
+                        chunks.append('\n'.join(current_chunk))
+                        current_chunk = [line_chunk]
+                        current_size = len(line_chunk)
+                    else:
+                        current_chunk.append(line_chunk)
+                        current_size += len(line_chunk) + 1
             else:
-                current_chunk.append(line)
-                current_size += line_size
+                if current_size + line_size > max_size and current_chunk:
+                    chunks.append('\n'.join(current_chunk))
+                    current_chunk = [line]
+                    current_size = line_size
+                else:
+                    current_chunk.append(line)
+                    current_size += line_size
         
         if current_chunk:
             chunks.append('\n'.join(current_chunk))
