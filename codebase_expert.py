@@ -3,11 +3,11 @@
 Codebase Expert - Universal tool for codebase knowledge
 Works with any project to create searchable video memory
 
-Usage:
-    # As MCP server (for Claude)
+MCP Installation (for Claude Desktop):
     claude mcp add "Codebase Expert" python /path/to/codebase_expert.py serve
-    
-    # Generate video only
+
+Standalone Usage:
+    # Generate video memory
     python codebase_expert.py generate
     
     # Interactive chat
@@ -352,10 +352,14 @@ class CodebaseExpert:
                 return "Knowledge base not found. Run 'generate' first."
             self.initialize_memvid()
         
-        results = self.retriever.search(query, top_k=top_k)
+        results = self.retriever.search_with_metadata(query, top_k=top_k)
         
         response = f"Found {len(results)} results for '{query}':\n\n"
-        for i, (chunk, score) in enumerate(results, 1):
+        for i, result in enumerate(results, 1):
+            # Extract text and score from metadata
+            chunk = result.get('text', str(result))
+            score = result.get('score', 0.0)
+            
             response += f"**Result {i}** (relevance: {score:.3f}):\n"
             response += f"```\n{chunk[:500]}...\n```\n\n"
         
@@ -369,13 +373,17 @@ class CodebaseExpert:
             self.initialize_memvid()
         
         # Use vector search to find relevant content
-        results = self.retriever.search(question, top_k=5)
+        results = self.retriever.search_with_metadata(question, top_k=5)
         
         if not results:
             return "No relevant information found."
         
         response = f"Found relevant information for: '{question}'\n\n"
-        for i, (chunk, score) in enumerate(results, 1):
+        for i, result in enumerate(results, 1):
+            # Extract text and score from metadata
+            chunk = result.get('text', str(result))
+            score = result.get('score', 0.0)
+                
             if score > 0.5:  # Only include highly relevant results
                 response += f"**Source {i}** (relevance: {score:.3f}):\n"
                 response += f"```\n{chunk}\n```\n\n"
@@ -389,7 +397,34 @@ class CodebaseExpert:
                 return "Knowledge base not found. Run 'generate' first."
             self.initialize_memvid()
         
-        context = self.retriever.get_context(topic, max_tokens=max_tokens)
+        # Use search to find relevant chunks and concatenate them
+        results = self.retriever.search_with_metadata(topic, top_k=10)
+        
+        if not results:
+            return f"No context found for '{topic}'"
+        
+        context_parts = []
+        total_chars = 0
+        
+        for result in results:
+            chunk = result.get('text', '')
+            score = result.get('score', 0.0)
+            
+            # Only include relevant results
+            if score > 0.3:
+                # Estimate tokens (rough approximation: 1 token ≈ 4 chars)
+                chunk_tokens = len(chunk) // 4
+                if total_chars + len(chunk) < max_tokens * 4:
+                    context_parts.append(chunk)
+                    total_chars += len(chunk)
+                else:
+                    # Add partial chunk to fit within token limit
+                    remaining_chars = (max_tokens * 4) - total_chars
+                    if remaining_chars > 100:
+                        context_parts.append(chunk[:remaining_chars] + "...")
+                    break
+        
+        context = "\n\n---\n\n".join(context_parts)
         return f"Context for '{topic}':\n\n{context}"
     
     # CLI methods
