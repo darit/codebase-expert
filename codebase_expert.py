@@ -4,7 +4,19 @@ Enhanced Codebase Expert - Universal tool for codebase knowledge
 Works with any project to create searchable video memory with better organization
 
 MCP Installation (for Claude Desktop):
-    claude mcp add "Codebase Expert" python /path/to/codebase_expert.py serve
+    The MCP server automatically works with the current directory (cwd) you specify:
+    
+    {
+      "mcpServers": {
+        "codebase-expert": {
+          "command": "python",
+          "args": ["/path/to/codebase_expert.py", "serve"],
+          "cwd": "/path/to/any/project"  # MCP will analyze this directory
+        }
+      }
+    }
+    
+    The MCP server will automatically generate video memory if it doesn't exist.
 
 Standalone Usage:
     # Generate video memory with organized output
@@ -274,7 +286,7 @@ class CodebaseExpert:
         """Check if file has code extension."""
         return any(file_path.lower().endswith(ext) for ext in CODE_EXTENSIONS)
     
-    def split_large_content(self, content: str, max_size: int = 300) -> List[str]:
+    def split_large_content(self, content: str, max_size: int = 400) -> List[str]:
         """Split large content into chunks."""
         if len(content) <= max_size:
             return [content]
@@ -1075,32 +1087,95 @@ Please provide a helpful and accurate answer based on the search results above."
                         "type": "object",
                         "properties": {}
                     }
+                ),
+                types.Tool(
+                    name="generate_codebase_video",
+                    description="Generate or regenerate the codebase video memory",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "force": {"type": "boolean", "default": False, "description": "Force regeneration even if video exists"}
+                        }
+                    }
                 )
             ]
         
         @self.server.call_tool()
         async def handle_call_tool(name: str, arguments: Optional[Dict[str, Any]]) -> List[types.TextContent]:
+            # Auto-generate video if it doesn't exist
             if not self.video_exists() and name != "get_project_info":
-                return [types.TextContent(
-                    type="text",
-                    text="Knowledge base not found. Please generate it first."
-                )]
+                try:
+                    # Generate video in background
+                    result_text = f"Generating knowledge base for {self.project_name}. This may take a few minutes...\n"
+                    result_text += "The codebase video is being generated. Please try again in a moment."
+                    
+                    # Start generation in a separate thread
+                    import threading
+                    def generate_async():
+                        try:
+                            self.generate_video()
+                        except Exception as e:
+                            logger.error(f"Failed to generate video: {e}")
+                    
+                    if not self.video_generation_in_progress:
+                        self.video_generation_in_progress = True
+                        self.video_generation_start_time = time.time()
+                        thread = threading.Thread(target=generate_async)
+                        thread.daemon = True
+                        thread.start()
+                    else:
+                        elapsed = time.time() - self.video_generation_start_time
+                        result_text = f"Video generation in progress... ({int(elapsed)}s elapsed)"
+                    
+                    return [types.TextContent(type="text", text=result_text)]
+                except Exception as e:
+                    return [types.TextContent(
+                        type="text",
+                        text=f"Failed to start video generation: {str(e)}"
+                    )]
             
             try:
                 if name == "search_codebase":
+                    if not self.retriever:
+                        self.initialize_memvid()
                     result = self.search_codebase(
                         arguments.get("query", ""),
                         arguments.get("top_k", 5)
                     )
                 elif name == "ask_expert":
+                    if not self.retriever:
+                        self.initialize_memvid()
                     result = self.ask_question(arguments.get("question", ""))
                 elif name == "get_context":
+                    if not self.retriever:
+                        self.initialize_memvid()
                     result = self.get_context(
                         arguments.get("topic", ""),
                         arguments.get("max_tokens", 2000)
                     )
                 elif name == "get_project_info":
                     result = self.get_project_info()
+                elif name == "generate_codebase_video":
+                    force = arguments.get("force", False)
+                    if force or not self.video_exists():
+                        # Start generation
+                        if not self.video_generation_in_progress:
+                            self.video_generation_in_progress = True
+                            self.video_generation_start_time = time.time()
+                            
+                            # Generate synchronously for MCP
+                            try:
+                                self.generate_video()
+                                result = f"Successfully generated video memory for {self.project_name}"
+                                self.video_generation_in_progress = False
+                            except Exception as e:
+                                self.video_generation_in_progress = False
+                                result = f"Failed to generate video: {str(e)}"
+                        else:
+                            elapsed = time.time() - self.video_generation_start_time
+                            result = f"Video generation already in progress... ({int(elapsed)}s elapsed)"
+                    else:
+                        result = f"Video already exists for {self.project_name}. Use force=true to regenerate."
                 else:
                     result = f"Unknown tool: {name}"
                 
