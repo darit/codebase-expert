@@ -428,12 +428,61 @@ class CodebaseExpert:
         return f"Context for '{topic}':\n\n{context}"
     
     # CLI methods
-    def interactive_chat(self):
-        """Run interactive search session."""
-        print(f"Codebase Expert Search - {self.project_name}")
-        print("Type 'exit' or 'quit' to end the session")
-        print("Commands: /search <query>, /help")
-        print("-" * 50)
+    def interactive_chat(self, use_lm_studio=True, lm_studio_url="http://localhost:1234"):
+        """Run interactive chat session with optional LM Studio integration."""
+        # ANSI color codes
+        class Colors:
+            HEADER = '\033[95m'
+            BLUE = '\033[94m'
+            CYAN = '\033[96m'
+            GREEN = '\033[92m'
+            YELLOW = '\033[93m'
+            RED = '\033[91m'
+            ENDC = '\033[0m'
+            BOLD = '\033[1m'
+        
+        # LM Studio integration
+        lm_chat = None
+        conversation_history = []
+        
+        if use_lm_studio:
+            try:
+                import requests
+                # Test LM Studio connection
+                try:
+                    response = requests.get(f"{lm_studio_url}/v1/models", timeout=2)
+                    if response.status_code == 200:
+                        models = response.json().get('data', [])
+                        if models:
+                            lm_chat = {
+                                'url': lm_studio_url,
+                                'model': models[0]['id'],
+                                'system_prompt': """You are a helpful AI assistant that specializes in analyzing codebases.
+You have access to a searchable knowledge base of the current project's code.
+When answering questions, you search the codebase and provide accurate, relevant information.
+Be concise but thorough in your responses."""
+                            }
+                            print(f"{Colors.GREEN}✓ LM Studio connected - Model: {lm_chat['model']}{Colors.ENDC}")
+                        else:
+                            print(f"{Colors.YELLOW}⚠ LM Studio connected but no model loaded{Colors.ENDC}")
+                except:
+                    print(f"{Colors.YELLOW}⚠ LM Studio not available - using search-only mode{Colors.ENDC}")
+            except ImportError:
+                print(f"{Colors.YELLOW}⚠ requests library not available - using search-only mode{Colors.ENDC}")
+        
+        # Print header
+        print(f"\n{Colors.BOLD}{Colors.BLUE}╔══════════════════════════════════════════════════════╗{Colors.ENDC}")
+        print(f"{Colors.BOLD}{Colors.BLUE}║          Codebase Expert - {self.project_name:<25} ║{Colors.ENDC}")
+        print(f"{Colors.BOLD}{Colors.BLUE}╚══════════════════════════════════════════════════════╝{Colors.ENDC}")
+        
+        print(f"\n{Colors.CYAN}Commands:{Colors.ENDC}")
+        print("  • Type your questions about the codebase")
+        print("  • /search <query> - Direct codebase search")
+        print("  • /context <topic> - Get detailed context")
+        print("  • /clear - Clear conversation history")
+        print("  • /help - Show this help")
+        print("  • exit or quit - Exit")
+        print(f"\n{Colors.YELLOW}{'─' * 55}{Colors.ENDC}\n")
         
         if not self.video_exists():
             print("Knowledge base not found. Generating...")
@@ -443,33 +492,105 @@ class CodebaseExpert:
         
         while True:
             try:
-                question = input("\nQuery: ").strip()
+                question = input(f"{Colors.GREEN}You: {Colors.ENDC}").strip()
                 if question.lower() in ['exit', 'quit']:
                     break
                 
                 if question == '/help':
-                    print("\nCommands:")
-                    print("  /search <query> - Search for specific code")
-                    print("  /help - Show this help")
-                    print("  exit/quit - Exit")
-                    print("\nJust type to search the codebase.")
+                    print(f"\n{Colors.CYAN}Commands:{Colors.ENDC}")
+                    print("  • Type questions naturally")
+                    print("  • /search <query> - Direct search")
+                    print("  • /context <topic> - Get context")
+                    print("  • /clear - Clear chat history")
+                    print("  • /help - Show this help")
+                    print("  • exit/quit - Exit")
+                    continue
+                
+                if question == '/clear':
+                    conversation_history = []
+                    print(f"{Colors.CYAN}Conversation history cleared.{Colors.ENDC}")
                     continue
                 
                 if question.startswith('/search '):
                     query = question[8:]
-                else:
-                    query = question
+                    print(f"\n{Colors.BOLD}Search Results:{Colors.ENDC}")
+                    response = self.search_codebase(query, top_k=5)
+                    print(response)
+                    continue
                 
-                print("\nSearching...")
-                response = self.search_codebase(query)
-                print(response)
+                if question.startswith('/context '):
+                    topic = question[9:]
+                    print(f"\n{Colors.BOLD}Context:{Colors.ENDC}")
+                    response = self.get_context(topic, max_tokens=3000)
+                    print(response)
+                    continue
+                
+                # Process with LM Studio if available
+                print(f"\n{Colors.BLUE}Assistant: {Colors.ENDC}", end='', flush=True)
+                
+                if lm_chat and use_lm_studio:
+                    try:
+                        import requests
+                        # Search codebase first
+                        search_results = self.search_codebase(question, top_k=3)
+                        
+                        # Build prompt with context
+                        prompt = f"""Based on the following search results from the codebase, please answer the user's question.
+
+User Question: {question}
+
+Codebase Search Results:
+{search_results.replace('**', '').replace('```', '')}
+
+Please provide a helpful and accurate answer based on the search results above."""
+                        
+                        # Add to conversation
+                        conversation_history.append({"role": "user", "content": prompt})
+                        
+                        # Build messages
+                        messages = [{"role": "system", "content": lm_chat['system_prompt']}] + conversation_history
+                        
+                        # Call LM Studio
+                        response = requests.post(
+                            f"{lm_chat['url']}/v1/chat/completions",
+                            json={
+                                "messages": messages,
+                                "temperature": 0.7,
+                                "max_tokens": -1,
+                                "stream": False
+                            },
+                            timeout=60
+                        )
+                        
+                        if response.status_code == 200:
+                            data = response.json()
+                            answer = data['choices'][0]['message']['content']
+                            print(answer)
+                            
+                            # Update history with original question
+                            conversation_history[-1]["content"] = question
+                            conversation_history.append({"role": "assistant", "content": answer})
+                        else:
+                            print(f"{Colors.RED}LM Studio error. Using search-only mode.{Colors.ENDC}")
+                            print(self.ask_question(question))
+                    except Exception as e:
+                        print(f"{Colors.RED}Error with LM Studio: {e}{Colors.ENDC}")
+                        print("\nFalling back to search-only mode:")
+                        print(self.ask_question(question))
+                else:
+                    # Use simple search mode
+                    response = self.ask_question(question)
+                    print(response)
+                
+                print()  # Empty line for readability
                 
             except KeyboardInterrupt:
-                break
+                print(f"\n{Colors.YELLOW}Use 'exit' to quit.{Colors.ENDC}")
+                continue
             except Exception as e:
-                print(f"\nError: {e}")
+                print(f"\n{Colors.RED}Error: {e}{Colors.ENDC}")
         
-        print("\nGoodbye!")
+        print(f"\n{Colors.CYAN}Thank you for using Codebase Expert!{Colors.ENDC}")
     
     # MCP Server methods
     async def run_mcp_server(self):
@@ -573,7 +694,9 @@ def main():
         epilog="""
 Examples:
   %(prog)s generate              # Generate knowledge base
-  %(prog)s chat                  # Interactive chat
+  %(prog)s chat                  # Interactive chat with LM Studio
+  %(prog)s chat --no-lm          # Chat without LM Studio (search only)
+  %(prog)s chat --port 8080      # Use custom LM Studio port
   %(prog)s ask "How does X work?" # Quick question
   %(prog)s search "pattern"      # Search codebase
   %(prog)s serve                 # Run as MCP server
@@ -587,6 +710,14 @@ Examples:
     parser.add_argument('--base-path', help='Override base directory (default: current directory)')
     parser.add_argument('--top-k', type=int, default=5, help='Number of search results')
     
+    # LM Studio options
+    parser.add_argument('--port', type=int, default=1234,
+                       help='LM Studio port (default: 1234)')
+    parser.add_argument('--host', default='localhost',
+                       help='LM Studio host (default: localhost)')
+    parser.add_argument('--no-lm', action='store_true',
+                       help='Disable LM Studio integration')
+    
     args = parser.parse_args()
     
     # Create expert
@@ -597,7 +728,10 @@ Examples:
         expert.generate_video()
     
     elif args.command == 'chat':
-        expert.interactive_chat()
+        # Build LM Studio URL
+        lm_studio_url = f"http://{args.host}:{args.port}"
+        use_lm_studio = not args.no_lm
+        expert.interactive_chat(use_lm_studio=use_lm_studio, lm_studio_url=lm_studio_url)
     
     elif args.command == 'ask':
         if not args.query:
