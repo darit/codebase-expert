@@ -72,7 +72,7 @@ logger = logging.getLogger(__name__)
 
 # Code generation constants
 DEFAULT_IGNORE_PATTERNS = [
-    '.git', '.gitignore', 'node_modules', '__pycache__', '*.pyc', '*.pyo', '*.pyd',
+    '.git', '.gitignore', 'node_modules', 'vendor', '__pycache__', '*.pyc', '*.pyo', '*.pyd',
     '.DS_Store', '*.log', '*.out', 'coverage', 'dist', 'build', '.env', '.env.*',
     '*.swp', '*.swo', '*~', 'venv', 'myenv', '.vscode', '.idea', '*.mp4', '*.json',
     'codebase_memory.mp4', 'codebase_index.json', '__pycache__', '.pytest_cache',
@@ -140,6 +140,12 @@ class CodebaseExpert:
         self.retriever = None
         self.video_generation_in_progress = False
         self.video_generation_start_time = None
+        
+        # File watching for real-time updates
+        self.file_watcher = None
+        self.watch_enabled = False
+        self.change_queue = []
+        self.last_update_time = None
         
         # MCP server if available
         self.server = Server("Codebase Expert") if MCP_AVAILABLE else None
@@ -286,38 +292,120 @@ class CodebaseExpert:
         """Check if file has code extension."""
         return any(file_path.lower().endswith(ext) for ext in CODE_EXTENSIONS)
     
-    def split_large_content(self, content: str, max_size: int = 400) -> List[str]:
-        """Split large content into chunks."""
+    def split_large_content(self, content: str, max_size: int = 600) -> List[str]:
+        """Split large content into semantic chunks with improved handling."""
         if len(content) <= max_size:
             return [content]
         
         chunks = []
         lines = content.split('\n')
+        
+        # Detect file type for better chunking
+        file_ext = self._detect_content_type(lines[:50])  # Check first 50 lines
+        
+        if file_ext in ['.py', '.java', '.go', '.rs', '.cs', '.cpp']:
+            # Language-aware chunking for structured languages
+            chunks = self._split_by_semantic_blocks(lines, max_size)
+        else:
+            # Fallback to line-based chunking with overlap
+            chunks = self._split_with_overlap(lines, max_size)
+        
+        return chunks
+    
+    def _detect_content_type(self, lines: List[str]) -> str:
+        """Detect content type from first few lines."""
+        content_sample = '\n'.join(lines[:10])
+        
+        # Python
+        if 'import ' in content_sample or 'from ' in content_sample or 'def ' in content_sample:
+            return '.py'
+        # JavaScript/TypeScript
+        elif 'const ' in content_sample or 'function ' in content_sample or 'import {' in content_sample:
+            return '.js'
+        # Java
+        elif 'package ' in content_sample or 'public class' in content_sample:
+            return '.java'
+        # Go
+        elif 'package main' in content_sample or 'func ' in content_sample:
+            return '.go'
+        # Rust
+        elif 'fn ' in content_sample or 'use ' in content_sample:
+            return '.rs'
+        
+        return '.txt'
+    
+    def _split_by_semantic_blocks(self, lines: List[str], max_size: int) -> List[str]:
+        """Split code by semantic blocks (functions, classes, etc.)."""
+        chunks = []
+        current_block = []
+        current_size = 0
+        indent_stack = [0]  # Track indentation levels
+        
+        for i, line in enumerate(lines):
+            # Detect semantic boundaries
+            stripped = line.lstrip()
+            indent = len(line) - len(stripped)
+            
+            # Check if this is a new top-level block
+            is_new_block = (
+                (stripped.startswith(('def ', 'class ', 'function ', 'func ', 'public ', 'private '))
+                 and indent <= indent_stack[0]) or
+                (i > 0 and not stripped and current_size > max_size * 0.7)  # Empty line when chunk is getting large
+            )
+            
+            if is_new_block and current_size > max_size * 0.5 and current_block:
+                # Save current block
+                chunks.append('\n'.join(current_block))
+                current_block = []
+                current_size = 0
+                indent_stack = [indent]
+            
+            # Add line to current block
+            current_block.append(line)
+            current_size += len(line) + 1
+            
+            # Update indent tracking
+            if stripped:
+                if indent > indent_stack[-1]:
+                    indent_stack.append(indent)
+                elif indent < indent_stack[-1]:
+                    while indent_stack and indent < indent_stack[-1]:
+                        indent_stack.pop()
+            
+            # Force split if block is too large
+            if current_size > max_size:
+                chunks.append('\n'.join(current_block))
+                current_block = []
+                current_size = 0
+                indent_stack = [0]
+        
+        if current_block:
+            chunks.append('\n'.join(current_block))
+        
+        return chunks
+    
+    def _split_with_overlap(self, lines: List[str], max_size: int) -> List[str]:
+        """Split content with overlap for better context preservation."""
+        chunks = []
+        overlap_lines = 5  # Number of lines to overlap
         current_chunk = []
         current_size = 0
         
-        for line in lines:
+        for i, line in enumerate(lines):
             line_size = len(line) + 1
-            # If a single line is too long, split it
-            if line_size > max_size:
-                # Split long lines into smaller pieces
-                for i in range(0, len(line), max_size - 50):
-                    line_chunk = line[i:i + max_size - 50]
-                    if current_size + len(line_chunk) > max_size and current_chunk:
-                        chunks.append('\n'.join(current_chunk))
-                        current_chunk = [line_chunk]
-                        current_size = len(line_chunk)
-                    else:
-                        current_chunk.append(line_chunk)
-                        current_size += len(line_chunk) + 1
-            else:
-                if current_size + line_size > max_size and current_chunk:
-                    chunks.append('\n'.join(current_chunk))
-                    current_chunk = [line]
-                    current_size = line_size
+            
+            if current_size + line_size > max_size and current_chunk:
+                chunks.append('\n'.join(current_chunk))
+                # Keep last few lines for context
+                if len(current_chunk) > overlap_lines:
+                    current_chunk = current_chunk[-overlap_lines:]
+                    current_size = sum(len(l) + 1 for l in current_chunk)
                 else:
-                    current_chunk.append(line)
-                    current_size += line_size
+                    current_chunk = []
+                    current_size = 0
+            
+            current_chunk.append(line)
+            current_size += line_size
         
         if current_chunk:
             chunks.append('\n'.join(current_chunk))
@@ -354,10 +442,17 @@ class CodebaseExpert:
                         
                         total_files += 1
                         file_list.append(relative_path)
+                        
+                        # Check file size and handle accordingly
+                        file_size = len(content)
+                        if file_size > 50000:  # Large file (>50KB)
+                            logger.info(f"Processing large file: {relative_path} ({file_size/1024:.1f}KB)")
+                        
                         content_chunks = self.split_large_content(content)
                         
                         for i, chunk_content in enumerate(content_chunks):
                             if len(content_chunks) > 1:
+                                # Add context about chunk position
                                 chunk = f"=== {relative_path} (part {i+1}/{len(content_chunks)}) ===\n\n{chunk_content}\n"
                             else:
                                 chunk = f"=== {relative_path} ===\n\n{chunk_content}\n"
@@ -534,6 +629,154 @@ File extensions in this codebase:
         structure_lines.append(f"{self.project_name}/")
         add_tree(self.base_path, "")
         return "\n".join(structure_lines)
+    
+    def _analyze_and_enhance_query(self, question: str) -> List[str]:
+        """Analyze query type and generate enhanced search queries."""
+        queries = [question]  # Always include original
+        
+        # Detect architectural patterns
+        architectural_keywords = [
+            'architecture', 'design', 'structure', 'pattern', 'how does', 
+            'how do', 'implementation', 'workflow', 'system', 'component',
+            'integration', 'relationship', 'interaction'
+        ]
+        
+        question_lower = question.lower()
+        is_architectural = any(keyword in question_lower for keyword in architectural_keywords)
+        
+        if is_architectural:
+            # Extract key concepts from the question
+            concepts = self._extract_concepts(question)
+            
+            # Generate variations
+            for concept in concepts:
+                # Add implementation-focused query
+                queries.append(f"{concept} implementation")
+                queries.append(f"{concept} class interface")
+                queries.append(f"{concept} module structure")
+            
+            # Add overview queries
+            queries.append("PROJECT OVERVIEW architecture")
+            queries.append("FOLDER STRUCTURE organization")
+        
+        # Handle generic searches
+        if len(question.split()) <= 3:  # Short, potentially generic query
+            # Expand with common patterns
+            base_terms = question.split()
+            for term in base_terms:
+                queries.append(f"class {term}")
+                queries.append(f"function {term}")
+                queries.append(f"module {term}")
+                queries.append(f"{term} configuration")
+        
+        return queries[:10]  # Limit to prevent over-searching
+    
+    def _extract_concepts(self, text: str) -> List[str]:
+        """Extract key concepts from text for query enhancement."""
+        # Remove common words
+        stop_words = {
+            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+            'of', 'with', 'by', 'from', 'about', 'into', 'through', 'during',
+            'how', 'does', 'do', 'what', 'where', 'when', 'why', 'is', 'are',
+            'was', 'were', 'been', 'being', 'have', 'has', 'had', 'will', 'would',
+            'could', 'should', 'may', 'might', 'must', 'can', 'this', 'that'
+        }
+        
+        words = text.lower().split()
+        concepts = []
+        
+        # Extract meaningful words
+        for word in words:
+            cleaned = word.strip('.,?!;:"\'')
+            if cleaned and len(cleaned) > 2 and cleaned not in stop_words:
+                concepts.append(cleaned)
+        
+        # Also extract bigrams for compound concepts
+        for i in range(len(words) - 1):
+            w1, w2 = words[i].strip('.,?!;:"\'''), words[i+1].strip('.,?!;:"\'')
+            if w1 not in stop_words and w2 not in stop_words:
+                concepts.append(f"{w1} {w2}")
+        
+        return concepts
+    
+    def _enhance_search_query(self, query: str) -> List[str]:
+        """Enhance search query with contextual variations."""
+        queries = [query]  # Original query
+        
+        # Handle camelCase and snake_case
+        # Convert camelCase to space-separated
+        import re
+        camel_split = re.sub(r'([a-z])([A-Z])', r'\1 \2', query)
+        if camel_split != query:
+            queries.append(camel_split.lower())
+        
+        # Convert snake_case to space-separated
+        snake_split = query.replace('_', ' ')
+        if snake_split != query:
+            queries.append(snake_split)
+        
+        # Add common programming patterns
+        if len(query.split()) == 1:  # Single word query
+            word = query.lower()
+            # Common prefixes/suffixes
+            queries.extend([
+                f"get{query}", f"set{query}", f"{query}Handler",
+                f"{query}Manager", f"{query}Service", f"{query}Controller",
+                f"handle{query}", f"process{query}", f"create{query}"
+            ])
+            
+            # File patterns
+            queries.extend([
+                f"{word}.py", f"{word}.js", f"{word}.ts", 
+                f"{word}.jsx", f"{word}.tsx", f"{word}.go"
+            ])
+        
+        # Limit queries to prevent over-searching
+        return list(dict.fromkeys(queries))[:8]
+    
+    def _deduplicate_and_rank_results(self, results: List[Dict]) -> List[Dict]:
+        """Deduplicate and rank search results by relevance."""
+        seen_content = {}
+        ranked_results = []
+        
+        for result in results:
+            chunk = result.get('text', '')
+            # Create content fingerprint
+            content_key = chunk[:300].strip()  # First 300 chars
+            
+            if content_key in seen_content:
+                # Update score if this is a better match
+                existing_idx = seen_content[content_key]
+                if result.get('score', 0) > ranked_results[existing_idx].get('score', 0):
+                    ranked_results[existing_idx] = result
+            else:
+                seen_content[content_key] = len(ranked_results)
+                ranked_results.append(result)
+        
+        # Sort by score
+        return sorted(ranked_results, key=lambda x: x.get('score', 0), reverse=True)
+    
+    def _get_search_suggestions(self, query: str) -> str:
+        """Provide helpful suggestions for failed searches."""
+        suggestions = ["💡 Search suggestions:"]
+        
+        # Check if it's a very generic term
+        generic_terms = ['config', 'handler', 'manager', 'service', 'util', 'helper', 'controller']
+        if query.lower() in generic_terms:
+            suggestions.append(f"- Try being more specific: '{query} authentication' or '{query} database'")
+            suggestions.append(f"- Search for actual implementations: 'class {query}' or 'function {query}'")
+        
+        # Suggest file search
+        suggestions.append(f"- Search for files: '{query}.py' or '{query}.js'")
+        
+        # Suggest function/class search
+        suggestions.append(f"- Search for definitions: 'def {query}' or 'class {query}'")
+        
+        # Suggest exploring project structure
+        suggestions.append("- Use '/info' to see project structure")
+        suggestions.append("- Try '/context overview' for project overview")
+        
+        return "\n".join(suggestions)
     
     def get_git_info(self) -> Dict[str, Any]:
         """Get git repository information."""
@@ -734,62 +977,99 @@ results = retriever.search_with_metadata("your query", top_k=5)
     
     # Query methods
     def search_codebase(self, query: str, top_k: int = 5) -> str:
-        """Search the codebase."""
+        """Search the codebase with enhanced contextual understanding."""
         if not self.retriever:
             if not self.video_exists():
                 return "Knowledge base not found. Run 'generate' first."
             self.initialize_memvid()
+        
+        # Enhance query for better results
+        enhanced_queries = self._enhance_search_query(query)
         
         # Suppress all output during search including logging
         import logging
         old_level = logging.root.level
         logging.root.setLevel(logging.CRITICAL)
         
+        all_results = []
         try:
             with io.StringIO() as buf, redirect_stdout(buf), redirect_stderr(buf):
-                results = self.retriever.search_with_metadata(query, top_k=top_k)
+                # Search with enhanced queries
+                for enhanced_query in enhanced_queries:
+                    results = self.retriever.search_with_metadata(enhanced_query, top_k=max(3, top_k//2))
+                    for result in results:
+                        result['query_used'] = enhanced_query
+                    all_results.extend(results)
         finally:
             logging.root.setLevel(old_level)
         
-        response = f"Found {len(results)} results for '{query}':\n\n"
-        for i, result in enumerate(results, 1):
+        # Deduplicate and rank results
+        unique_results = self._deduplicate_and_rank_results(all_results)
+        
+        if not unique_results:
+            # Provide helpful suggestions for generic queries
+            suggestions = self._get_search_suggestions(query)
+            return f"No results found for '{query}'.\n\n{suggestions}"
+        
+        response = f"Found {len(unique_results[:top_k])} results for '{query}':\n\n"
+        for i, result in enumerate(unique_results[:top_k], 1):
             # Extract text and score from metadata
             chunk = result.get('text', str(result))
             score = result.get('score', 0.0)
+            query_used = result.get('query_used', query)
             
-            response += f"**Result {i}** (relevance: {score:.3f}):\n"
-            response += f"```\n{chunk[:500]}...\n```\n\n"
+            response += f"**Result {i}** (relevance: {score:.3f})"
+            if query_used != query:
+                response += f" [searched: '{query_used}']"
+            response += f":\n```\n{chunk[:500]}...\n```\n\n"
         
         return response
     
     def ask_question(self, question: str) -> str:
-        """Ask a question about the codebase using vector search."""
+        """Ask a question about the codebase using enhanced vector search with query analysis."""
         if not self.retriever:
             if not self.video_exists():
                 return "Knowledge base not found. Run 'generate' first."
             self.initialize_memvid()
+        
+        # Analyze question type and enhance query
+        enhanced_queries = self._analyze_and_enhance_query(question)
         
         # Use vector search to find relevant content, suppress all output
         import logging
         old_level = logging.root.level
         logging.root.setLevel(logging.CRITICAL)
         
+        all_results = []
         try:
             with io.StringIO() as buf, redirect_stdout(buf), redirect_stderr(buf):
-                results = self.retriever.search_with_metadata(question, top_k=5)
+                # Search with multiple query variations
+                for query in enhanced_queries:
+                    results = self.retriever.search_with_metadata(query, top_k=3)
+                    all_results.extend(results)
         finally:
             logging.root.setLevel(old_level)
         
-        if not results:
+        # Deduplicate and sort by relevance
+        seen_chunks = set()
+        unique_results = []
+        for result in sorted(all_results, key=lambda x: x.get('score', 0), reverse=True):
+            chunk = result.get('text', '')
+            chunk_preview = chunk[:200]  # Use first 200 chars for deduplication
+            if chunk_preview not in seen_chunks:
+                seen_chunks.add(chunk_preview)
+                unique_results.append(result)
+        
+        if not unique_results:
             return "No relevant information found."
         
         response = f"Found relevant information for: '{question}'\n\n"
-        for i, result in enumerate(results, 1):
+        for i, result in enumerate(unique_results[:5], 1):
             # Extract text and score from metadata
             chunk = result.get('text', str(result))
             score = result.get('score', 0.0)
                 
-            if score > 0.5:  # Only include highly relevant results
+            if score > 0.3:  # Lower threshold for architectural questions
                 response += f"**Source {i}** (relevance: {score:.3f}):\n"
                 response += f"```\n{chunk}\n```\n\n"
         
@@ -857,6 +1137,134 @@ results = retriever.search_with_metadata("your query", top_k=5)
         else:
             return "No metadata found. Generate the knowledge base first."
     
+    # File watching methods
+    def start_file_watcher(self):
+        """Start watching for file changes in the codebase."""
+        try:
+            from watchdog.observers import Observer
+            from watchdog.events import FileSystemEventHandler
+            
+            class CodebaseChangeHandler(FileSystemEventHandler):
+                def __init__(self, expert):
+                    self.expert = expert
+                    self.ignore_patterns = DEFAULT_IGNORE_PATTERNS
+                
+                def on_modified(self, event):
+                    if not event.is_directory and self._should_process(event.src_path):
+                        self.expert._handle_file_change('modified', event.src_path)
+                
+                def on_created(self, event):
+                    if not event.is_directory and self._should_process(event.src_path):
+                        self.expert._handle_file_change('created', event.src_path)
+                
+                def on_deleted(self, event):
+                    if not event.is_directory and self._should_process(event.src_path):
+                        self.expert._handle_file_change('deleted', event.src_path)
+                
+                def _should_process(self, path):
+                    # Check if file should be processed
+                    relative_path = os.path.relpath(path, self.expert.base_path)
+                    return (not self.expert.should_ignore(relative_path, self.ignore_patterns) 
+                           and self.expert.has_code_extension(path))
+            
+            self.file_watcher = Observer()
+            event_handler = CodebaseChangeHandler(self)
+            self.file_watcher.schedule(event_handler, self.base_path, recursive=True)
+            self.file_watcher.start()
+            self.watch_enabled = True
+            logger.info(f"Started file watcher for {self.base_path}")
+            
+            # Start background thread to process changes
+            import threading
+            self._change_processor_thread = threading.Thread(target=self._process_change_queue)
+            self._change_processor_thread.daemon = True
+            self._change_processor_thread.start()
+            
+        except ImportError:
+            logger.warning("watchdog not installed. Install with: pip install watchdog")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to start file watcher: {e}")
+            return False
+        
+        return True
+    
+    def stop_file_watcher(self):
+        """Stop watching for file changes."""
+        if self.file_watcher:
+            self.file_watcher.stop()
+            self.file_watcher.join()
+            self.watch_enabled = False
+            logger.info("Stopped file watcher")
+    
+    def _handle_file_change(self, change_type: str, file_path: str):
+        """Handle a file change event."""
+        relative_path = os.path.relpath(file_path, self.base_path)
+        change_info = {
+            'type': change_type,
+            'path': relative_path,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        self.change_queue.append(change_info)
+        logger.debug(f"File {change_type}: {relative_path}")
+    
+    def _process_change_queue(self):
+        """Process queued file changes in background."""
+        import time
+        
+        while self.watch_enabled:
+            if self.change_queue and len(self.change_queue) >= 10:
+                # Process changes in batch
+                changes = self.change_queue[:10]
+                self.change_queue = self.change_queue[10:]
+                
+                # Update the index incrementally
+                self._update_index_incrementally(changes)
+                
+            time.sleep(5)  # Check every 5 seconds
+    
+    def _update_index_incrementally(self, changes: List[Dict]):
+        """Update the search index incrementally based on file changes."""
+        if not self.retriever:
+            return
+        
+        try:
+            # This is a placeholder for incremental update logic
+            # In a real implementation, you would:
+            # 1. Extract chunks from changed files
+            # 2. Update the vector embeddings
+            # 3. Update the search index
+            # 4. Save the updated index
+            
+            logger.info(f"Processing {len(changes)} file changes...")
+            
+            # For now, mark that an update is needed
+            self.last_update_time = datetime.now()
+            
+            # Notify user in interactive mode
+            if hasattr(self, '_interactive_mode'):
+                print(f"\n📝 {len(changes)} files changed. Consider regenerating the knowledge base.")
+                
+        except Exception as e:
+            logger.error(f"Failed to update index: {e}")
+    
+    def get_recent_changes(self, limit: int = 10) -> str:
+        """Get recent file changes."""
+        if not self.change_queue:
+            return "No recent changes detected."
+        
+        changes = self.change_queue[-limit:]
+        response = f"Recent file changes ({len(changes)} total):\n\n"
+        
+        for change in changes:
+            response += f"- {change['type']}: {change['path']} at {change['timestamp']}\n"
+        
+        if self.last_update_time:
+            response += f"\nLast index update: {self.last_update_time.strftime('%Y-%m-%d %H:%M:%S')}"
+        
+        return response
+    
     # CLI methods
     def interactive_chat(self, use_lm_studio=True, lm_studio_url="http://localhost:1234"):
         """Run interactive chat session with optional LM Studio integration."""
@@ -914,6 +1322,9 @@ Be concise but thorough in your responses."""
         print("  • /search <query> - Direct codebase search")
         print("  • /context <topic> - Get detailed context")
         print("  • /info - Show project information")
+        print("  • /watch - Start file change monitoring")
+        print("  • /unwatch - Stop file change monitoring")
+        print("  • /changes - Show recent file changes")
         print("  • /clear - Clear conversation history")
         print("  • /help - Show this help")
         print("  • exit or quit - Exit")
@@ -937,6 +1348,9 @@ Be concise but thorough in your responses."""
                     print("  • /search <query> - Direct search")
                     print("  • /context <topic> - Get context")
                     print("  • /info - Show project info")
+                    print("  • /watch - Start file monitoring")
+                    print("  • /unwatch - Stop file monitoring")
+                    print("  • /changes - Show recent changes")
                     print("  • /clear - Clear chat history")
                     print("  • /help - Show this help")
                     print("  • exit/quit - Exit")
@@ -949,6 +1363,22 @@ Be concise but thorough in your responses."""
                 if question == '/clear':
                     conversation_history = []
                     print(f"{Colors.CYAN}Conversation history cleared.{Colors.ENDC}")
+                    continue
+                
+                if question == '/watch':
+                    if self.start_file_watcher():
+                        print(f"{Colors.GREEN}✓ File monitoring started{Colors.ENDC}")
+                    else:
+                        print(f"{Colors.YELLOW}⚠ Could not start file monitoring (install watchdog: pip install watchdog){Colors.ENDC}")
+                    continue
+                
+                if question == '/unwatch':
+                    self.stop_file_watcher()
+                    print(f"{Colors.CYAN}File monitoring stopped{Colors.ENDC}")
+                    continue
+                
+                if question == '/changes':
+                    print(f"\n{self.get_recent_changes()}")
                     continue
                 
                 if question.startswith('/search '):
@@ -1097,6 +1527,27 @@ Please provide a helpful and accurate answer based on the search results above."
                             "force": {"type": "boolean", "default": False, "description": "Force regeneration even if video exists"}
                         }
                     }
+                ),
+                types.Tool(
+                    name="monitor_changes",
+                    description="Start or stop monitoring file changes",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "enum": ["start", "stop", "status"], "description": "Action to perform"}
+                        },
+                        "required": ["action"]
+                    }
+                ),
+                types.Tool(
+                    name="get_recent_changes",
+                    description="Get recent file changes detected by the monitor",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "limit": {"type": "integer", "default": 10, "description": "Number of recent changes to show"}
+                        }
+                    }
                 )
             ]
         
@@ -1176,6 +1627,24 @@ Please provide a helpful and accurate answer based on the search results above."
                             result = f"Video generation already in progress... ({int(elapsed)}s elapsed)"
                     else:
                         result = f"Video already exists for {self.project_name}. Use force=true to regenerate."
+                elif name == "monitor_changes":
+                    action = arguments.get("action", "status")
+                    if action == "start":
+                        if self.start_file_watcher():
+                            result = f"Started monitoring file changes in {self.project_name}"
+                        else:
+                            result = "Failed to start file monitoring. Install watchdog: pip install watchdog"
+                    elif action == "stop":
+                        self.stop_file_watcher()
+                        result = "Stopped monitoring file changes"
+                    else:  # status
+                        if self.watch_enabled:
+                            result = f"File monitoring is active. {len(self.change_queue)} changes queued."
+                        else:
+                            result = "File monitoring is not active"
+                elif name == "get_recent_changes":
+                    limit = arguments.get("limit", 10)
+                    result = self.get_recent_changes(limit)
                 else:
                     result = f"Unknown tool: {name}"
                 
