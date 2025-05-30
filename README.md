@@ -30,7 +30,7 @@ python codebase_expert.py --help
 ### For MCP with Claude Desktop
 ```bash
 # Add to Claude's config to use as an MCP tool
-# See MCP Server Mode section below
+claude mcp add "Codebase Expert" /path/to/venv/bin/python /path/to/codebase_expert.py serve
 ```
 
 ## 🎯 Usage
