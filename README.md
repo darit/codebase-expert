@@ -1,4 +1,4 @@
-# Enhanced Codebase Expert - AI-Powered Code Understanding Tool (v1.1.0)
+# Enhanced Codebase Expert - AI-Powered Code Understanding Tool
 
 A powerful wrapper around [memvid](https://github.com/AwePhD/memvid) that transforms any codebase into a searchable video memory with enhanced context, enabling AI-powered code understanding, semantic search, and natural language Q&A. Works with any programming language or framework.
 
