@@ -687,13 +687,13 @@ File extensions in this codebase:
         
         # Extract meaningful words
         for word in words:
-            cleaned = word.strip('.,?!;:"\'')
+            cleaned = word.strip('.,?!;:\'"')
             if cleaned and len(cleaned) > 2 and cleaned not in stop_words:
                 concepts.append(cleaned)
         
         # Also extract bigrams for compound concepts
         for i in range(len(words) - 1):
-            w1, w2 = words[i].strip('.,?!;:"\'''), words[i+1].strip('.,?!;:"\'')
+            w1, w2 = words[i].strip('.,?!;:\'"'), words[i+1].strip('.,?!;:\'"')
             if w1 not in stop_words and w2 not in stop_words:
                 concepts.append(f"{w1} {w2}")
         
