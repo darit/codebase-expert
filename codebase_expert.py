@@ -384,6 +384,13 @@ class CodebaseExpert:
 
         return chunks
 
+    def _split_oversized_line(self, line: str, max_size: int) -> List[str]:
+        """Split a single oversized line into character-based chunks"""
+        chunks = []
+        for i in range(0, len(line), max_size):
+            chunks.append(line[i:i + max_size])
+        return chunks
+
     def _split_with_overlap(self, lines: List[str], max_size: int) -> List[str]:
         """Split content with overlap for better context preservation."""
         chunks = []
@@ -393,6 +400,13 @@ class CodebaseExpert:
 
         for i, line in enumerate(lines):
             line_size = len(line) + 1
+
+            # Handle oversized single lines
+            if current_size + line_size > max_size and len(current_chunk) == 0:
+                # Single line exceeds max_size, split it character-wise  
+                line_chunks = self._split_oversized_line(line, max_size - 50)  # Leave room for JSON overhead
+                chunks.extend(line_chunks)
+                continue
 
             if current_size + line_size > max_size and current_chunk:
                 chunks.append('\n'.join(current_chunk))
@@ -892,7 +906,7 @@ results = retriever.search_with_metadata("your query", top_k=5)
         # Define QR generation parameters for clarity and easy tuning.
         # A QR code (v40, 'L' correction) holds ~2953 bytes. Based on verification,
         # JSON overhead is significant (~14KB for 1.8KB content). We need much smaller chunks.
-        MAX_CHUNK_CONTENT_SIZE = 300
+        MAX_CHUNK_CONTENT_SIZE = 200  # Reduced from 300 for JSON overhead safety
 
         # If we're using old location for reading, reset paths for generation
         if self._using_old_location:
