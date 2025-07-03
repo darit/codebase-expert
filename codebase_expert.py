@@ -66,6 +66,25 @@ try:
 except ImportError:
     MEMVID_AVAILABLE = False
 
+# Conditional imports for AST chunking
+try:
+    from chunkers.factory import get_chunker
+    from chunkers.base import ChunkingError
+    AST_CHUNKING_AVAILABLE = True
+except ImportError:
+    AST_CHUNKING_AVAILABLE = False
+    # We'll log a warning later if needed, not at import time.
+
+# Conditional imports for enhanced RAG
+try:
+    from rag_components.embedding_manager import EmbeddingManager
+    from rag_components.knowledge_base import KnowledgeBase
+    from rag_components.retriever import HybridRetriever
+    from rag_components.context_assembler import ContextAssembler
+    ENHANCED_RAG_AVAILABLE = True
+except ImportError:
+    ENHANCED_RAG_AVAILABLE = False
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -140,6 +159,12 @@ class CodebaseExpert:
         self.retriever = None
         self.video_generation_in_progress = False
         self.video_generation_start_time = None
+
+        # Enhanced RAG components
+        self.embedding_manager: Optional[EmbeddingManager] = None
+        self.knowledge_base: Optional[KnowledgeBase] = None
+        self.hybrid_retriever: Optional[HybridRetriever] = None
+        self.context_assembler: Optional[ContextAssembler] = None
 
         # File watching for real-time updates
         self.file_watcher = None
@@ -427,12 +452,19 @@ class CodebaseExpert:
         return chunks
 
     def extract_code_chunks(self, scan_path: str, relative_to: str, max_chunk_size: int = 600) -> Tuple[List[str], List[str]]:
-        """Extract code chunks from directory."""
+        """Extract code chunks from directory, using AST chunking where possible."""
         chunks = []
         ignore_patterns = DEFAULT_IGNORE_PATTERNS + self.read_gitignore(scan_path)
 
         total_files = 0
         file_list = []
+
+        # Log a single warning if the chunker module isn't available
+        if not AST_CHUNKING_AVAILABLE:
+            logger.warning("AST chunker module not found or failed to import. Falling back to line-based chunking for all files.")
+            # Make it permanently false to avoid re-checking
+            global AST_CHUNKING_AVAILABLE
+            AST_CHUNKING_AVAILABLE = False
 
         for root, dirs, files in os.walk(scan_path):
             dirs[:] = [d for d in dirs if not self.should_ignore(os.path.join(root, d), ignore_patterns)]
@@ -451,33 +483,115 @@ class CodebaseExpert:
                     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                         content = f.read()
 
-                        if not content.strip():
-                            continue
+                    if not content.strip():
+                        continue
 
-                        total_files += 1
-                        file_list.append(relative_path)
-
-                        # Check file size and handle accordingly
-                        file_size = len(content)
-                        if file_size > 50000:  # Large file (>50KB)
-                            logger.info(f"Processing large file: {relative_path} ({file_size/1024:.1f}KB)")
-
+                    total_files += 1
+                    file_list.append(relative_path)
+                    
+                    content_chunks = []
+                    if AST_CHUNKING_AVAILABLE:
+                        chunker = get_chunker(file_path, max_chunk_size)
+                        try:
+                            content_chunks = chunker.chunk(content)
+                        except ChunkingError as e:
+                            logger.warning(f"AST chunking failed for {relative_path}: {e}. Falling back to line-based splitting.")
+                            # Use the original split_large_content as fallback
+                            content_chunks = self.split_large_content(content, max_size=max_chunk_size)
+                    else:
+                        # Fallback if chunker module is not available at all
                         content_chunks = self.split_large_content(content, max_size=max_chunk_size)
 
-                        for i, chunk_content in enumerate(content_chunks):
-                            if len(content_chunks) > 1:
-                                # Add context about chunk position
-                                chunk = f"=== {relative_path} (part {i+1}/{len(content_chunks)}) ===\n\n{chunk_content}\n"
-                            else:
-                                chunk = f"=== {relative_path} ===\n\n{chunk_content}\n"
+                    for i, chunk_content in enumerate(content_chunks):
+                        if not chunk_content.strip():
+                            continue
+                        
+                        if len(content_chunks) > 1:
+                            chunk = f"=== {relative_path} (part {i+1}/{len(content_chunks)}) ===\n\n{chunk_content}\n"
+                        else:
+                            chunk = f"=== {relative_path} ===\n\n{chunk_content}\n"
 
-                            chunks.append(chunk)
+                        chunks.append(chunk)
 
                 except Exception as e:
-                    logger.error(f"Error reading {file_path}: {e}")
+                    logger.error(f"Error processing file {file_path}: {e}")
 
         print(f"Processed {total_files} files into {len(chunks)} chunks")
         return chunks, file_list
+
+    def extract_structured_chunks(self, scan_path: str, relative_to: str, max_chunk_size: int = 600) -> Tuple[List[Dict[str, Any]], List[str]]:
+        """Extract code chunks as structured data for enhanced RAG."""
+        structured_chunks = []
+        ignore_patterns = DEFAULT_IGNORE_PATTERNS + self.read_gitignore(scan_path)
+
+        total_files = 0
+        file_list = []
+        chunk_counter = 0
+
+        # Log a single warning if the chunker module isn't available
+        if not AST_CHUNKING_AVAILABLE:
+            logger.warning("AST chunker module not found. Falling back to line-based chunking.")
+
+        for root, dirs, files in os.walk(scan_path):
+            dirs[:] = [d for d in dirs if not self.should_ignore(os.path.join(root, d), ignore_patterns)]
+
+            for file in files:
+                file_path = os.path.join(root, file)
+                relative_path = os.path.relpath(file_path, relative_to)
+
+                if self.should_ignore(relative_path, ignore_patterns):
+                    continue
+
+                if not self.has_code_extension(file_path):
+                    continue
+
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+
+                    if not content.strip():
+                        continue
+
+                    total_files += 1
+                    file_list.append(relative_path)
+                    
+                    content_chunks = []
+                    if AST_CHUNKING_AVAILABLE:
+                        chunker = get_chunker(file_path, max_chunk_size)
+                        try:
+                            content_chunks = chunker.chunk(content)
+                        except ChunkingError as e:
+                            logger.warning(f"AST chunking failed for {relative_path}: {e}. Falling back to line-based splitting.")
+                            content_chunks = self.split_large_content(content, max_size=max_chunk_size)
+                    else:
+                        content_chunks = self.split_large_content(content, max_size=max_chunk_size)
+
+                    for i, chunk_content in enumerate(content_chunks):
+                        if not chunk_content.strip():
+                            continue
+                        
+                        chunk_id = f"chunk_{chunk_counter}"
+                        chunk_counter += 1
+                        
+                        structured_chunk = {
+                            'id': chunk_id,
+                            'content': chunk_content,
+                            'metadata': {
+                                'file_path': relative_path,
+                                'chunk_index': i,
+                                'total_chunks': len(content_chunks),
+                                'file_extension': os.path.splitext(file_path)[1],
+                                'file_size': len(content)
+                            }
+                        }
+                        
+                        structured_chunks.append(structured_chunk)
+
+                except Exception as e:
+                    logger.error(f"Error processing file {file_path}: {e}")
+
+        print(f"Processed {total_files} files into {len(structured_chunks)} structured chunks")
+        return structured_chunks, file_list
 
     def generate_context_chunks(self, file_list: List[str]) -> List[str]:
         """Generate special context chunks for better RAG quality."""
@@ -899,16 +1013,52 @@ results = retriever.search_with_metadata("your query", top_k=5)
 
         return package_path
 
+    def setup_enhanced_rag(self, force_rebuild: bool = False):
+        """Initialize enhanced RAG components."""
+        if not ENHANCED_RAG_AVAILABLE:
+            logger.warning("Enhanced RAG components not available. Install dependencies: pip install sentence-transformers transformers torch faiss-cpu rank-bm25")
+            return False
+        
+        print("🔧 Setting up enhanced RAG system...")
+        
+        # Initialize embedding manager with CodeBERT
+        try:
+            self.embedding_manager = EmbeddingManager(
+                model_name="microsoft/codebert-base", 
+                use_sentence_transformer=True  # For memvid compatibility
+            )
+        except Exception as e:
+            logger.warning(f"Failed to load CodeBERT, falling back to all-MiniLM-L6-v2: {e}")
+            self.embedding_manager = EmbeddingManager(
+                model_name="sentence-transformers/all-MiniLM-L6-v2",
+                use_sentence_transformer=True
+            )
+        
+        # Initialize knowledge base
+        self.knowledge_base = KnowledgeBase(self.output_dir)
+        
+        # Try to load existing knowledge base
+        if not force_rebuild:
+            self.knowledge_base.load()
+        
+        if self.knowledge_base.is_ready:
+            # Initialize retriever and context assembler
+            self.hybrid_retriever = HybridRetriever(self.embedding_manager, self.knowledge_base)
+            self.context_assembler = ContextAssembler(self.knowledge_base)
+            print("✅ Enhanced RAG system ready.")
+            return True
+        else:
+            print("⚠️ Knowledge base not found. Run generation to build it.")
+            return False
+
     def generate_video(self, create_zip: bool = False, video_only_zip: bool = False):
-        """Generate the video from codebase with enhanced organization."""
+        """Generate enhanced knowledge base and video memory with AST chunking and hybrid search."""
         self.ensure_dependencies()
         
-        # Define QR generation parameters for clarity and easy tuning.
-        # A QR code (v40, 'L' correction) holds ~2953 bytes. Based on verification,
-        # JSON overhead is significant (~14KB for 1.8KB content). We need much smaller chunks.
-        MAX_CHUNK_CONTENT_SIZE = 200  # Reduced from 300 for JSON overhead safety
+        # QR generation parameters for memvid compatibility
+        MAX_CHUNK_CONTENT_SIZE = 200  # For QR code constraints
 
-        # If we're using old location for reading, reset paths for generation
+        # Reset paths if using old location
         if self._using_old_location:
             self.output_dir = os.path.join(self.base_path, f"codebase-memory-{self.project_name}")
             self.video_path = os.path.join(self.output_dir, "codebase_memory.mp4")
@@ -916,118 +1066,179 @@ results = retriever.search_with_metadata("your query", top_k=5)
             self.faiss_path = os.path.join(self.output_dir, "codebase_index.faiss")
             self.metadata_path = os.path.join(self.output_dir, "metadata.json")
 
-        # Create output directory if it doesn't exist
         os.makedirs(self.output_dir, exist_ok=True)
 
         print(f"🚀 Scanning {self.project_name} codebase at: {self.base_path}")
         print(f"📁 Output directory: {self.output_dir}")
-        print("⏳ This may take a few minutes for large codebases...")
+        print("⏳ Building enhanced knowledge base...")
 
-        # Extract all code chunks
-        all_chunks, file_list = self.extract_code_chunks(self.base_path, self.base_path, MAX_CHUNK_CONTENT_SIZE)
+        # Step 1: Extract structured chunks for enhanced RAG
+        print("\n🧩 Extracting code chunks with AST analysis...")
+        structured_chunks, file_list = self.extract_structured_chunks(
+            self.base_path, self.base_path, max_chunk_size=600  # Larger for better semantic units
+        )
 
-        print(f"\n📊 Total chunks collected: {len(all_chunks)}")
-
-        # Add special context chunks
-        print("🔍 Adding enhanced context...")
-        context_chunks = self.generate_context_chunks(file_list)
-        all_chunks = context_chunks + all_chunks
-        print(f"📊 Total chunks with context: {len(all_chunks)}")
-
-        if not all_chunks:
+        if not structured_chunks:
             print("❌ No code files found!")
-            print("Make sure you're in the right directory and have code files.")
             return False
 
-        # Generate metadata
-        metadata = self.generate_metadata(file_list, all_chunks)
+        print(f"✅ Extracted {len(structured_chunks)} semantic chunks from {len(file_list)} files")
+
+        # Step 2: Build Enhanced Knowledge Base
+        enhanced_kb_built = False
+        if ENHANCED_RAG_AVAILABLE:
+            try:
+                print("\n🧠 Building enhanced knowledge base...")
+                self.setup_enhanced_rag(force_rebuild=True)
+                
+                # Generate embeddings
+                chunk_contents = [chunk['content'] for chunk in structured_chunks]
+                print(f"🔄 Generating embeddings for {len(chunk_contents)} chunks...")
+                embeddings = self.embedding_manager.get_embeddings(chunk_contents)
+                
+                # Build knowledge base
+                self.knowledge_base.build(structured_chunks, embeddings)
+                
+                # Initialize retriever and context assembler
+                self.hybrid_retriever = HybridRetriever(self.embedding_manager, self.knowledge_base)
+                self.context_assembler = ContextAssembler(self.knowledge_base)
+                
+                enhanced_kb_built = True
+                print("✅ Enhanced knowledge base built successfully!")
+                
+            except Exception as e:
+                logger.error(f"Failed to build enhanced knowledge base: {e}")
+                print("⚠️ Falling back to standard memvid generation...")
+        else:
+            print("⚠️ Enhanced RAG not available. Install: pip install sentence-transformers transformers torch faiss-cpu rank-bm25")
+
+        # Step 3: Generate memvid video (for compatibility and QR storage)
+        print("\n🎬 Building video memory...")
+        
+        # Convert structured chunks to string format for memvid
+        string_chunks = []
+        for chunk in structured_chunks:
+            # Truncate content for QR constraints
+            content = chunk['content']
+            if len(content) > MAX_CHUNK_CONTENT_SIZE:
+                # Split large chunks for QR compatibility
+                sub_chunks = [content[i:i + MAX_CHUNK_CONTENT_SIZE] 
+                             for i in range(0, len(content), MAX_CHUNK_CONTENT_SIZE)]
+                for i, sub_content in enumerate(sub_chunks):
+                    header = f"=== {chunk['metadata']['file_path']} (part {i+1}/{len(sub_chunks)}) ==="
+                    string_chunks.append(f"{header}\n\n{sub_content}\n")
+            else:
+                header = f"=== {chunk['metadata']['file_path']} ==="
+                string_chunks.append(f"{header}\n\n{content}\n")
+        
+        # Add context chunks for memvid
+        context_chunks = self.generate_context_chunks(file_list)
+        all_memvid_chunks = context_chunks + string_chunks
+        
+        print(f"📊 Total memvid chunks: {len(all_memvid_chunks)}")
+
+        # Build memvid video with custom embedding model if available
+        from memvid.config import get_default_config
+        config = get_default_config()
+        config['QR_ERROR_CORRECTION'] = 'L'
+        
+        if enhanced_kb_built:
+            # Use same embedding model for consistency
+            custom_model = self.embedding_manager.get_sentence_transformer_model()
+            encoder = MemvidEncoder(config=config, embedding_model=custom_model)
+        else:
+            encoder = MemvidEncoder(config=config)
+            
+        encoder.add_chunks(all_memvid_chunks)
+        encoder.build_video(self.video_path, self.index_path, show_progress=True)
 
         # Save metadata
+        metadata = self.generate_metadata(file_list, all_memvid_chunks)
+        if enhanced_kb_built:
+            metadata['enhanced_rag'] = {
+                'enabled': True,
+                'embedding_model': self.embedding_manager.model_name,
+                'total_structured_chunks': len(structured_chunks),
+                'knowledge_base_stats': self.knowledge_base.get_stats()
+            }
+        else:
+            metadata['enhanced_rag'] = {'enabled': False}
+            
         with open(self.metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2)
 
-        print("\n🎬 Building video memory...")
-        
-        # --- Verification Step ---
-        # Log the largest chunk's JSON size to confirm it's within safe limits.
-        # The memvid library adds its own overhead ('chunk_id', etc.), but the content
-        # is the primary driver of size.
-        if all_chunks:
-            max_json_size = 0
-            for chunk in all_chunks:
-                # Get size of our chunk when serialized to JSON in bytes
-                json_size = len(json.dumps(chunk).encode('utf-8'))
-                if json_size > max_json_size:
-                    max_json_size = json_size
-            
-            # QR v40 'L' capacity is 2953 bytes.
-            print(f"📏 Max chunk JSON size: {max_json_size} bytes (QR limit: ~2950 bytes)")
-        # --- End Verification Step ---
-        
-        # Get default configuration and only override QR error correction for better capacity
-        from memvid.config import get_default_config
-        config = get_default_config()
-        config['QR_ERROR_CORRECTION'] = 'L'  # Low error correction for maximum data capacity
-        
-        encoder = MemvidEncoder(config=config)
-        encoder.add_chunks(all_chunks)
-
-        encoder.build_video(
-            self.video_path,
-            self.index_path,
-            show_progress=True
-        )
-
-        # Check if FAISS index was created
-        if not os.path.exists(self.faiss_path):
-            # memvid might save it with a different name, try to find it
-            possible_faiss = os.path.join(self.output_dir, "codebase_index.faiss")
-            if not os.path.exists(possible_faiss):
-                possible_faiss = os.path.join(os.path.dirname(self.index_path),
-                                              os.path.splitext(os.path.basename(self.index_path))[0] + ".faiss")
-            if os.path.exists(possible_faiss) and possible_faiss != self.faiss_path:
-                shutil.copy2(possible_faiss, self.faiss_path)
-
-        print(f"\n✅ Video generated successfully!")
+        # Results summary
+        print(f"\n✅ Generation complete!")
         print(f"📹 Video: {self.video_path}")
         print(f"🔍 Index: {self.index_path}")
-        print(f"📊 Metadata: {self.metadata_path}")
-
-        total_size = sum(len(chunk) for chunk in all_chunks)
+        
+        if enhanced_kb_built:
+            kb_stats = self.knowledge_base.get_stats()
+            print(f"🧠 Enhanced KB: {kb_stats['total_chunks']} chunks, {kb_stats['embedding_dimension']}D embeddings")
+        
+        total_size = sum(len(chunk) for chunk in all_memvid_chunks)
         print(f"\n📈 Summary:")
-        print(f"- Total files: {len(file_list)}")
-        print(f"- Total chunks: {len(all_chunks)}")
-        print(f"- Total size: {total_size / 1024 / 1024:.2f} MB")
+        print(f"- Files processed: {len(file_list)}")
+        print(f"- Semantic chunks: {len(structured_chunks)}")
+        print(f"- Video chunks: {len(all_memvid_chunks)}")
+        print(f"- Total content: {total_size / 1024 / 1024:.2f} MB")
         print(f"- Video size: {os.path.getsize(self.video_path) / 1024 / 1024:.2f} MB")
-        print(f"- Compression ratio: {os.path.getsize(self.video_path) / total_size * 100:.1f}%")
 
         # Create zip package if requested
         if create_zip:
             print(f"\n📦 Creating shareable package...")
             package_path = self.create_package(include_video_only=video_only_zip)
-            print(f"✅ Package created: {package_path}")
-            print(f"   Size: {os.path.getsize(package_path) / 1024 / 1024:.2f} MB")
+            print(f"✅ Package: {package_path} ({os.path.getsize(package_path) / 1024 / 1024:.2f} MB)")
 
-        print(f"\n💡 Next steps:")
-        print(f"1. Run interactive chat: python {os.path.basename(__file__)} chat")
-        print(f"2. Share the folder: {self.output_dir}")
-        if create_zip:
-            print(f"3. Or share the zip: {os.path.basename(package_path)}")
+        print(f"\n💡 Enhanced features available:")
+        if enhanced_kb_built:
+            print(f"✅ Hybrid search (semantic + keyword)")
+            print(f"✅ Intelligent context assembly")
+            print(f"✅ AST-based semantic chunking")
+        print(f"✅ Video memory (QR-encoded)")
+        print(f"✅ MCP integration ready")
 
         return True
 
     # Query methods
     def search_codebase(self, query: str, top_k: int = 5) -> str:
-        """Search the codebase with enhanced contextual understanding."""
+        """Search the codebase with enhanced hybrid retrieval and intelligent context assembly."""
+        # Try enhanced RAG first
+        if ENHANCED_RAG_AVAILABLE and self.hybrid_retriever and self.context_assembler:
+            try:
+                print(f"🔍 Performing hybrid search for: '{query}'")
+                
+                # Use hybrid retriever for better results
+                results = self.hybrid_retriever.search(query, top_k=top_k * 2)
+                
+                if not results:
+                    return f"No results found for '{query}' using enhanced search."
+                
+                # Use context assembler for intelligent formatting
+                context = self.context_assembler.assemble_context(
+                    results, 
+                    max_chunks=top_k,
+                    max_chars=4000,
+                    deduplicate=True,
+                    group_by_files=True
+                )
+                
+                return context
+                
+            except Exception as e:
+                logger.error(f"Enhanced search failed: {e}")
+                print("⚠️ Falling back to standard search...")
+        
+        # Fallback to standard memvid search
         if not self.retriever:
             if not self.video_exists():
                 return "Knowledge base not found. Run 'generate' first."
             self.initialize_memvid()
 
-        # Enhance query for better results
+        # Enhance query for better results  
         enhanced_queries = self._enhance_search_query(query)
 
-        # Suppress all output during search including logging
+        # Suppress output during search
         import logging
         old_level = logging.root.level
         logging.root.setLevel(logging.CRITICAL)
@@ -1035,7 +1246,6 @@ results = retriever.search_with_metadata("your query", top_k=5)
         all_results = []
         try:
             with io.StringIO() as buf, redirect_stdout(buf), redirect_stderr(buf):
-                # Search with enhanced queries
                 for enhanced_query in enhanced_queries:
                     results = self.retriever.search_with_metadata(enhanced_query, top_k=max(3, top_k//2))
                     for result in results:
@@ -1048,13 +1258,11 @@ results = retriever.search_with_metadata("your query", top_k=5)
         unique_results = self._deduplicate_and_rank_results(all_results)
 
         if not unique_results:
-            # Provide helpful suggestions for generic queries
             suggestions = self._get_search_suggestions(query)
             return f"No results found for '{query}'.\n\n{suggestions}"
 
         response = f"Found {len(unique_results[:top_k])} results for '{query}':\n\n"
         for i, result in enumerate(unique_results[:top_k], 1):
-            # Extract text and score from metadata
             chunk = result.get('text', str(result))
             score = result.get('score', 0.0)
             query_used = result.get('query_used', query)

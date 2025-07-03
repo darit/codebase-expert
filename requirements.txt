@@ -1,0 +1,22 @@
+# requirements.txt
+
+# Core dependencies
+memvid
+mcp==1.9.2
+pydantic==2.11.5
+starlette==0.47.0
+uvicorn==0.34.2
+watchdog
+requests
+
+# New dependencies for AST chunking
+tree-sitter==0.21.0
+tree-sitter-languages==1.10.2
+
+# Enhanced RAG dependencies
+sentence-transformers
+transformers
+torch
+faiss-cpu
+rank-bm25
+networkx
