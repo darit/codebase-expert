@@ -16,12 +16,22 @@ sys.path.insert(0, str(project_root))
 
 try:
     # Import the original CodebaseExpert class
-    # Use importlib to avoid circular import issues
-    import importlib.util
-    spec = importlib.util.spec_from_file_location("codebase_expert_module", project_root / "codebase_expert.py")
-    codebase_expert_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(codebase_expert_module)
-    OriginalCodebaseExpert = codebase_expert_module.CodebaseExpert
+    # Try local packaged version first, then fall back to root file
+    try:
+        # Use importlib to load from packaged version
+        import importlib.util
+        from pathlib import Path
+        core_file = Path(__file__).parent / "codebase_expert_core.py"
+        spec = importlib.util.spec_from_file_location("codebase_expert_core", core_file)
+        codebase_expert_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(codebase_expert_module)
+        OriginalCodebaseExpert = codebase_expert_module.CodebaseExpert
+    except (FileNotFoundError, AttributeError):
+        # Fall back to root file for local development
+        spec = importlib.util.spec_from_file_location("codebase_expert_module", project_root / "codebase_expert.py")
+        codebase_expert_module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(codebase_expert_module)
+        OriginalCodebaseExpert = codebase_expert_module.CodebaseExpert
     
     # Create a wrapper class that maintains the same interface
     class CodebaseExpert(OriginalCodebaseExpert):
