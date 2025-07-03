@@ -28,13 +28,15 @@ try:
         """
         pass
 
-except ImportError as e:
+except ImportError as import_error:
     # Fallback for development
+    _import_error_msg = str(import_error)
+    
     class CodebaseExpert:
         def __init__(self, base_path=None, output_dir=None):
             self.base_path = base_path
             self.output_dir = output_dir
-            print(f"Warning: Using fallback CodebaseExpert class. Import error: {e}")
+            print(f"Warning: Using fallback CodebaseExpert class. Import error: {_import_error_msg}")
         
         def generate_video(self, create_zip=False, video_only_zip=False):
             print(f"Generate video called with zip={create_zip}, video_only={video_only_zip}")
