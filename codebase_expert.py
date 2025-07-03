@@ -453,6 +453,8 @@ class CodebaseExpert:
 
     def extract_code_chunks(self, scan_path: str, relative_to: str, max_chunk_size: int = 600) -> Tuple[List[str], List[str]]:
         """Extract code chunks from directory, using AST chunking where possible."""
+        global AST_CHUNKING_AVAILABLE
+        
         chunks = []
         ignore_patterns = DEFAULT_IGNORE_PATTERNS + self.read_gitignore(scan_path)
 
@@ -463,7 +465,6 @@ class CodebaseExpert:
         if not AST_CHUNKING_AVAILABLE:
             logger.warning("AST chunker module not found or failed to import. Falling back to line-based chunking for all files.")
             # Make it permanently false to avoid re-checking
-            global AST_CHUNKING_AVAILABLE
             AST_CHUNKING_AVAILABLE = False
 
         for root, dirs, files in os.walk(scan_path):
