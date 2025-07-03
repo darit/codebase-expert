@@ -148,7 +148,7 @@ python codebase_expert.py search "error handling" --top-k 10
 If you're using Claude Code, you can add the MCP server with one command:
 ```bash
 # Add to Claude Code (works from any project directory)
-claude mcp add CodebaseExpert -- uvx run --from git+https://github.com/darit/codebase-expert.git codebase-expert serve
+claude mcp add CodebaseExpert -- uvx --from git+https://github.com/darit/codebase-expert.git codebase-expert serve
 ```
 
 #### Option B: Claude Desktop Configuration
