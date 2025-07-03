@@ -23,7 +23,28 @@ A next-generation AI-powered tool that transforms any codebase into an intellige
 
 ## 📦 Installation
 
-### Method 1: Clone Repository (Recommended)
+### Method 1: uvx Installation (Recommended)
+Install globally using uvx for easy access from any directory:
+```bash
+# Install from GitHub
+uvx install git+https://github.com/darit/codebase-expert.git
+
+# Now available as global command
+codebase-expert --help
+```
+
+### Method 2: pip Installation
+```bash
+# Clone and install locally
+git clone https://github.com/darit/codebase-expert.git
+cd codebase-expert
+pip install -e .
+
+# Or install directly from GitHub
+pip install git+https://github.com/darit/codebase-expert.git
+```
+
+### Method 3: Clone Repository (Development)
 ```bash
 # Clone the repository
 git clone https://github.com/darit/codebase-expert.git
@@ -37,15 +58,6 @@ pip install sentence-transformers transformers torch faiss-cpu rank-bm25 network
 
 # Or install all dependencies at once
 pip install -r requirements.txt
-```
-
-### Method 2: Direct Download
-```bash
-# Download just the main script
-curl -O https://raw.githubusercontent.com/darit/codebase-expert/refs/heads/main/codebase_expert.py
-
-# Basic usage (will prompt for enhanced dependencies)
-python codebase_expert.py --help
 ```
 
 ### Enhanced RAG Dependencies
@@ -62,13 +74,18 @@ pip install sentence-transformers transformers torch faiss-cpu rank-bm25 network
 Create an intelligent knowledge base from your codebase:
 ```bash
 cd /path/to/your/project
-python codebase_expert.py generate
+
+# Using the new uvx-installed command (recommended)
+codebase-expert generate
 
 # With custom output directory
-python codebase_expert.py generate --output-dir ./my-codebase-memory
+codebase-expert generate --output-dir ./my-codebase-memory
 
 # Generate and create shareable package
-python codebase_expert.py generate --zip
+codebase-expert generate --zip
+
+# Legacy usage (if using the old script)
+python codebase_expert.py generate
 ```
 
 **What Gets Generated:**
@@ -92,13 +109,16 @@ For the best experience, use with [LM Studio](https://lmstudio.ai/):
 ```bash
 # Start LM Studio and load any chat model
 # Then run:
-python codebase_expert.py chat
+codebase-expert chat
 
 # Custom LM Studio port
-python codebase_expert.py chat --port 8080
+codebase-expert chat --port 8080
 
 # Without LM Studio (search-only mode)
-python codebase_expert.py chat --no-lm
+codebase-expert chat --no-lm
+
+# Legacy usage
+python codebase_expert.py chat
 ```
 
 Chat commands:
@@ -112,14 +132,42 @@ Chat commands:
 ### 3. Quick Operations
 ```bash
 # One-off question
-python codebase_expert.py ask "What database ORM is used?"
+codebase-expert ask "What database ORM is used?"
 
 # Direct search
+codebase-expert search "error handling" --top-k 10
+
+# Legacy usage
+python codebase_expert.py ask "What database ORM is used?"
 python codebase_expert.py search "error handling" --top-k 10
 ```
 
 ### 4. MCP Server Mode
-Add to Claude Desktop's config file:
+
+#### Option A: Claude Code Integration (Easiest)
+If you're using Claude Code, you can add the MCP server with one command:
+```bash
+# Add to Claude Code (works from any project directory)
+claude mcp add CodebaseExpert -- uvx run --from git+https://github.com/darit/codebase-expert.git codebase-expert serve
+```
+
+#### Option B: Claude Desktop Configuration
+For Claude Desktop, add to your config file:
+
+**With uvx installation (recommended):**
+```json
+{
+  "mcpServers": {
+    "codebase-expert": {
+      "command": "codebase-expert",
+      "args": ["serve"],
+      "cwd": "/path/to/your/project"
+    }
+  }
+}
+```
+
+**Legacy method:**
 ```json
 {
   "mcpServers": {
