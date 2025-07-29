@@ -317,23 +317,42 @@ class CodebaseExpert:
         """Check if file has code extension."""
         return any(file_path.lower().endswith(ext) for ext in CODE_EXTENSIONS)
 
-    def split_large_content(self, content: str, max_size: int = 600) -> List[str]:
-        """Split large content into semantic chunks with improved handling."""
+    def split_large_content(self, content: str, max_size: int = 400) -> List[str]:
+        """Split large content into smaller, QR-code safe chunks."""
         if len(content) <= max_size:
             return [content]
 
         chunks = []
         lines = content.split('\n')
+        current_chunk = []
+        current_size = 0
 
-        # Detect file type for better chunking
-        file_ext = self._detect_content_type(lines[:50])  # Check first 50 lines
+        for line in lines:
+            line_size = len(line) + 1  # +1 for newline
 
-        if file_ext in ['.py', '.java', '.go', '.rs', '.cs', '.cpp']:
-            # Language-aware chunking for structured languages
-            chunks = self._split_by_semantic_blocks(lines, max_size)
-        else:
-            # Fallback to line-based chunking with overlap
-            chunks = self._split_with_overlap(lines, max_size)
+            # If single line is too big, split it
+            if line_size > max_size:
+                if current_chunk:
+                    chunks.append('\n'.join(current_chunk))
+                    current_chunk = []
+                    current_size = 0
+
+                # Split the line character by character
+                for i in range(0, len(line), max_size - 10):  # Leave some buffer
+                    chunks.append(line[i:i + max_size - 10])
+                continue
+
+            # Check if adding this line would exceed limit
+            if current_size + line_size > max_size and current_chunk:
+                chunks.append('\n'.join(current_chunk))
+                current_chunk = [line]
+                current_size = line_size
+            else:
+                current_chunk.append(line)
+                current_size += line_size
+
+        if current_chunk:
+            chunks.append('\n'.join(current_chunk))
 
         return chunks
 
@@ -428,7 +447,7 @@ class CodebaseExpert:
 
             # Handle oversized single lines
             if current_size + line_size > max_size and len(current_chunk) == 0:
-                # Single line exceeds max_size, split it character-wise  
+                # Single line exceeds max_size, split it character-wise
                 line_chunks = self._split_oversized_line(line, max_size - 50)  # Leave room for JSON overhead
                 chunks.extend(line_chunks)
                 continue
@@ -451,10 +470,8 @@ class CodebaseExpert:
 
         return chunks
 
-    def extract_code_chunks(self, scan_path: str, relative_to: str, max_chunk_size: int = 600) -> Tuple[List[str], List[str]]:
-        """Extract code chunks from directory, using AST chunking where possible."""
-        global AST_CHUNKING_AVAILABLE
-        
+    def extract_code_chunks(self, scan_path: str, relative_to: str, max_chunk_size: int = 300) -> Tuple[List[str], List[str]]:
+        """Extract code chunks from directory with improved error handling."""
         chunks = []
         ignore_patterns = DEFAULT_IGNORE_PATTERNS + self.read_gitignore(scan_path)
 
@@ -463,9 +480,7 @@ class CodebaseExpert:
 
         # Log a single warning if the chunker module isn't available
         if not AST_CHUNKING_AVAILABLE:
-            logger.warning("AST chunker module not found or failed to import. Falling back to line-based chunking for all files.")
-            # Make it permanently false to avoid re-checking
-            AST_CHUNKING_AVAILABLE = False
+            logger.warning("AST chunker module not found. Falling back to line-based chunking.")
 
         for root, dirs, files in os.walk(scan_path):
             dirs[:] = [d for d in dirs if not self.should_ignore(os.path.join(root, d), ignore_patterns)]
@@ -489,35 +504,24 @@ class CodebaseExpert:
 
                     total_files += 1
                     file_list.append(relative_path)
-                    
-                    content_chunks = []
-                    if AST_CHUNKING_AVAILABLE:
-                        chunker = get_chunker(file_path, max_chunk_size)
-                        try:
-                            content_chunks = chunker.chunk(content)
-                        except ChunkingError as e:
-                            logger.warning(f"AST chunking failed for {relative_path}: {e}. Falling back to line-based splitting.")
-                            # Use the original split_large_content as fallback
-                            content_chunks = self.split_large_content(content, max_size=max_chunk_size)
-                    else:
-                        # Fallback if chunker module is not available at all
-                        content_chunks = self.split_large_content(content, max_size=max_chunk_size)
 
-                    for i, chunk_content in enumerate(content_chunks):
-                        if not chunk_content.strip():
-                            continue
-                        
-                        if len(content_chunks) > 1:
-                            chunk = f"=== {relative_path} (part {i+1}/{len(content_chunks)}) ===\n\n{chunk_content}\n"
-                        else:
-                            chunk = f"=== {relative_path} ===\n\n{chunk_content}\n"
+                    # Use safer chunking with smaller size limit
+                    content_chunks = self.split_large_content(content, max_chunk_size)
 
-                        chunks.append(chunk)
+                    for i, chunk in enumerate(content_chunks):
+                        chunk_info = {
+                            "file": relative_path,
+                            "chunk": i + 1,
+                            "total_chunks": len(content_chunks),
+                            "content": chunk
+                        }
+                        chunks.append(json.dumps(chunk_info, ensure_ascii=False))
 
                 except Exception as e:
-                    logger.error(f"Error processing file {file_path}: {e}")
+                    logger.error(f"Error processing file {relative_path}: {e}")
+                    continue
 
-        print(f"Processed {total_files} files into {len(chunks)} chunks")
+        logger.info(f"✅ Extracted {len(chunks)} chunks from {total_files} files")
         return chunks, file_list
 
     def extract_structured_chunks(self, scan_path: str, relative_to: str, max_chunk_size: int = 600) -> Tuple[List[Dict[str, Any]], List[str]]:
@@ -555,7 +559,7 @@ class CodebaseExpert:
 
                     total_files += 1
                     file_list.append(relative_path)
-                    
+
                     content_chunks = []
                     if AST_CHUNKING_AVAILABLE:
                         chunker = get_chunker(file_path, max_chunk_size)
@@ -570,10 +574,10 @@ class CodebaseExpert:
                     for i, chunk_content in enumerate(content_chunks):
                         if not chunk_content.strip():
                             continue
-                        
+
                         chunk_id = f"chunk_{chunk_counter}"
                         chunk_counter += 1
-                        
+
                         structured_chunk = {
                             'id': chunk_id,
                             'content': chunk_content,
@@ -585,7 +589,7 @@ class CodebaseExpert:
                                 'file_size': len(content)
                             }
                         }
-                        
+
                         structured_chunks.append(structured_chunk)
 
                 except Exception as e:
@@ -1019,13 +1023,13 @@ results = retriever.search_with_metadata("your query", top_k=5)
         if not ENHANCED_RAG_AVAILABLE:
             logger.warning("Enhanced RAG components not available. Install dependencies: pip install sentence-transformers transformers torch faiss-cpu rank-bm25")
             return False
-        
+
         print("🔧 Setting up enhanced RAG system...")
-        
+
         # Initialize embedding manager with CodeBERT
         try:
             self.embedding_manager = EmbeddingManager(
-                model_name="microsoft/codebert-base", 
+                model_name="microsoft/codebert-base",
                 use_sentence_transformer=True  # For memvid compatibility
             )
         except Exception as e:
@@ -1034,14 +1038,14 @@ results = retriever.search_with_metadata("your query", top_k=5)
                 model_name="sentence-transformers/all-MiniLM-L6-v2",
                 use_sentence_transformer=True
             )
-        
+
         # Initialize knowledge base
         self.knowledge_base = KnowledgeBase(self.output_dir)
-        
+
         # Try to load existing knowledge base
         if not force_rebuild:
             self.knowledge_base.load()
-        
+
         if self.knowledge_base.is_ready:
             # Initialize retriever and context assembler
             self.hybrid_retriever = HybridRetriever(self.embedding_manager, self.knowledge_base)
@@ -1055,7 +1059,7 @@ results = retriever.search_with_metadata("your query", top_k=5)
     def generate_video(self, create_zip: bool = False, video_only_zip: bool = False):
         """Generate enhanced knowledge base and video memory with AST chunking and hybrid search."""
         self.ensure_dependencies()
-        
+
         # QR generation parameters for memvid compatibility
         MAX_CHUNK_CONTENT_SIZE = 200  # For QR code constraints
 
@@ -1091,22 +1095,22 @@ results = retriever.search_with_metadata("your query", top_k=5)
             try:
                 print("\n🧠 Building enhanced knowledge base...")
                 self.setup_enhanced_rag(force_rebuild=True)
-                
+
                 # Generate embeddings
                 chunk_contents = [chunk['content'] for chunk in structured_chunks]
                 print(f"🔄 Generating embeddings for {len(chunk_contents)} chunks...")
                 embeddings = self.embedding_manager.get_embeddings(chunk_contents)
-                
+
                 # Build knowledge base
                 self.knowledge_base.build(structured_chunks, embeddings)
-                
+
                 # Initialize retriever and context assembler
                 self.hybrid_retriever = HybridRetriever(self.embedding_manager, self.knowledge_base)
                 self.context_assembler = ContextAssembler(self.knowledge_base)
-                
+
                 enhanced_kb_built = True
                 print("✅ Enhanced knowledge base built successfully!")
-                
+
             except Exception as e:
                 logger.error(f"Failed to build enhanced knowledge base: {e}")
                 print("⚠️ Falling back to standard memvid generation...")
@@ -1115,7 +1119,7 @@ results = retriever.search_with_metadata("your query", top_k=5)
 
         # Step 3: Generate memvid video (for compatibility and QR storage)
         print("\n🎬 Building video memory...")
-        
+
         # Convert structured chunks to string format for memvid
         string_chunks = []
         for chunk in structured_chunks:
@@ -1123,35 +1127,49 @@ results = retriever.search_with_metadata("your query", top_k=5)
             content = chunk['content']
             if len(content) > MAX_CHUNK_CONTENT_SIZE:
                 # Split large chunks for QR compatibility
-                sub_chunks = [content[i:i + MAX_CHUNK_CONTENT_SIZE] 
-                             for i in range(0, len(content), MAX_CHUNK_CONTENT_SIZE)]
+                sub_chunks = [content[i:i + MAX_CHUNK_CONTENT_SIZE]
+                              for i in range(0, len(content), MAX_CHUNK_CONTENT_SIZE)]
                 for i, sub_content in enumerate(sub_chunks):
                     header = f"=== {chunk['metadata']['file_path']} (part {i+1}/{len(sub_chunks)}) ==="
                     string_chunks.append(f"{header}\n\n{sub_content}\n")
             else:
                 header = f"=== {chunk['metadata']['file_path']} ==="
                 string_chunks.append(f"{header}\n\n{content}\n")
-        
+
         # Add context chunks for memvid
         context_chunks = self.generate_context_chunks(file_list)
         all_memvid_chunks = context_chunks + string_chunks
-        
+
         print(f"📊 Total memvid chunks: {len(all_memvid_chunks)}")
 
         # Build memvid video with custom embedding model if available
         from memvid.config import get_default_config
         config = get_default_config()
         config['QR_ERROR_CORRECTION'] = 'L'
-        
+
         if enhanced_kb_built:
             # Use same embedding model for consistency
             custom_model = self.embedding_manager.get_sentence_transformer_model()
             encoder = MemvidEncoder(config=config, embedding_model=custom_model)
         else:
             encoder = MemvidEncoder(config=config)
-            
+
         encoder.add_chunks(all_memvid_chunks)
-        encoder.build_video(self.video_path, self.index_path, show_progress=True)
+        try:
+            encoder.build_video(self.video_path, self.index_path, show_progress=True)
+        except Exception as e:
+            if "Invalid version" in str(e) and "expected 1 to 40" in str(e):
+                print("⚠️  QR code size limit exceeded. Retrying with smaller chunks...")
+                # Retry with even smaller chunks
+                chunks, file_list = self.extract_code_chunks(self.base_path, self.base_path, max_chunk_size=200)
+
+                encoder = MemvidEncoder()
+                for chunk in chunks:
+                    encoder.add_text(chunk)
+
+                encoder.build_video(self.video_path, self.index_path, show_progress=True)
+            else:
+                raise e
 
         # Save metadata
         metadata = self.generate_metadata(file_list, all_memvid_chunks)
@@ -1164,7 +1182,7 @@ results = retriever.search_with_metadata("your query", top_k=5)
             }
         else:
             metadata['enhanced_rag'] = {'enabled': False}
-            
+
         with open(self.metadata_path, 'w') as f:
             json.dump(metadata, f, indent=2)
 
@@ -1172,11 +1190,11 @@ results = retriever.search_with_metadata("your query", top_k=5)
         print(f"\n✅ Generation complete!")
         print(f"📹 Video: {self.video_path}")
         print(f"🔍 Index: {self.index_path}")
-        
+
         if enhanced_kb_built:
             kb_stats = self.knowledge_base.get_stats()
             print(f"🧠 Enhanced KB: {kb_stats['total_chunks']} chunks, {kb_stats['embedding_dimension']}D embeddings")
-        
+
         total_size = sum(len(chunk) for chunk in all_memvid_chunks)
         print(f"\n📈 Summary:")
         print(f"- Files processed: {len(file_list)}")
@@ -1208,35 +1226,35 @@ results = retriever.search_with_metadata("your query", top_k=5)
         if ENHANCED_RAG_AVAILABLE and self.hybrid_retriever and self.context_assembler:
             try:
                 print(f"🔍 Performing hybrid search for: '{query}'")
-                
+
                 # Use hybrid retriever for better results
                 results = self.hybrid_retriever.search(query, top_k=top_k * 2)
-                
+
                 if not results:
                     return f"No results found for '{query}' using enhanced search."
-                
+
                 # Use context assembler for intelligent formatting
                 context = self.context_assembler.assemble_context(
-                    results, 
+                    results,
                     max_chunks=top_k,
                     max_chars=4000,
                     deduplicate=True,
                     group_by_files=True
                 )
-                
+
                 return context
-                
+
             except Exception as e:
                 logger.error(f"Enhanced search failed: {e}")
                 print("⚠️ Falling back to standard search...")
-        
+
         # Fallback to standard memvid search
         if not self.retriever:
             if not self.video_exists():
                 return "Knowledge base not found. Run 'generate' first."
             self.initialize_memvid()
 
-        # Enhance query for better results  
+        # Enhance query for better results
         enhanced_queries = self._enhance_search_query(query)
 
         # Suppress output during search
@@ -1714,12 +1732,26 @@ Please provide a helpful and accurate answer based on the search results above."
 
     # MCP Server methods
     async def run_mcp_server(self):
-        """Run as MCP server."""
+        """Run as MCP server with timeout and better error handling."""
         if not MCP_AVAILABLE:
             print("MCP not available. Installing...")
             subprocess.run([sys.executable, "-m", "pip", "install", "mcp"], check=True)
             print("Please restart to run as MCP server.")
             return
+
+        print(f"🌐 Starting MCP server for {self.project_name}...")
+        print("📁 Working directory:", self.base_path)
+        print("⚠️  Note: This will hang waiting for MCP client connection")
+        print("💡 Use Ctrl+C to stop")
+
+        # Set up signal handler for graceful shutdown
+        import signal
+        def signal_handler(signum, frame):
+            print("\n🛑 Shutting down MCP server...")
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
 
         # Set up handlers
         @self.server.list_tools()
@@ -1903,23 +1935,28 @@ Please provide a helpful and accurate answer based on the search results above."
             except Exception as e:
                 return [types.TextContent(type="text", text=f"Error: {str(e)}")]
 
-        # Run server
-        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            await self.server.run(
-                read_stream,
-                write_stream,
-                InitializationOptions(
-                    server_name="Codebase Expert",
-                    server_version="0.1.0",
-                    capabilities=self.server.get_capabilities(
-                        notification_options=NotificationOptions(),
-                        experimental_capabilities={},
+        # Run server with timeout monitoring
+        try:
+            async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+                await self.server.run(
+                    read_stream,
+                    write_stream,
+                    InitializationOptions(
+                        server_name="Codebase Expert",
+                        server_version="0.1.0",
+                        capabilities=self.server.get_capabilities(
+                            notification_options=NotificationOptions(),
+                            experimental_capabilities={},
+                        ),
                     ),
-                ),
-            )
+                )
+        except KeyboardInterrupt:
+            print("\n🛑 MCP server stopped by user")
+        except Exception as e:
+            print(f"❌ MCP server error: {e}")
 
 def main():
-    """Main entry point."""
+    """Main entry point with better error handling."""
     parser = argparse.ArgumentParser(
         description="Enhanced Codebase Expert - Universal tool for codebase knowledge",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1989,7 +2026,20 @@ Examples:
         print(expert.search_codebase(query, args.top_k))
 
     elif args.command == 'serve':
-        asyncio.run(expert.run_mcp_server())
+        try:
+            asyncio.run(expert.run_mcp_server())
+        except KeyboardInterrupt:
+            print("\n👋 MCP server stopped")
+        except Exception as e:
+            print(f"❌ Error running MCP server: {e}")
+            sys.exit(1)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n👋 Interrupted by user")
+        sys.exit(0)
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        sys.exit(1)
